@@ -1,0 +1,63 @@
+# ---- Python (tools/python-oracle/) ----
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+pip-wheel-metadata/
+
+# Test / coverage caches
+.pytest_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+coverage.xml
+
+# ---- Rust (Phase 4+: future inspiring crate) ----
+target/
+**/*.rs.bk
+*.pdb
+
+# Cargo.lock policy: this repo is a library crate, but we commit Cargo.lock
+# anyway for reproducible benches and noise tests. Do NOT add Cargo.lock here.
+
+# ---- Editor / IDE ----
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+*~
+.\#*
+\#*\#
+
+# ---- macOS / OS junk ----
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ---- Local environment ----
+.env
+.env.local
+.env.*.local
+
+# ---- Misc local artifacts ----
+*.log
+*.tmp
+*.bak
+.cache/
