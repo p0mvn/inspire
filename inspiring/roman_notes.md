@@ -130,6 +130,22 @@ Setting `2d = 2^k` so (`k = log_2(2d)`). This gives exactly:
 - `-1 === 2d - 1` is the order-2 generator
 - `5` is the order-`d/2` generator
 
+### "Half-trace" / "partial-trace"
+
+Let `p(X) = c_0 + c_1·X + c_2·X² + … + c_{d-1}·X^{d-1}` in `R_q`.
+
+Pick a power-of-two `γ` dividing `d`, and let `g = 2d/γ + 1`. Then
+
+```
+π_γ(p) := Σ_{i=0}^{γ-1} τ_g^i(p)  =  γ · Σ_{γ | j} c_j · X^j
+```
+
+In words: summing the first `γ` powers of `τ_g` keeps only the coefficients at positions divisible by `γ`, and multiplies them by `γ`. Every other coefficient cancels.
+
+This is a **partial constant-extractor**. By itself it doesn't isolate `c_0`. It isolates the entire arithmetic-progression `{c_0, c_γ, c_{2γ}, …}`
+
+InsPIRing: pick largest `γ` such that `γ < g`. Then, **only two** coefficients survive `c_0` and `c_{d/2}`. Then, use one application of `τ_h` to cancel `c_{d/2}`. That's Lemma 1.
+
 ## Open Questions
 
 - What are the security implications on this new structure? We clearly make the encryption more structured than before.

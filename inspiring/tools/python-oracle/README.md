@@ -24,7 +24,7 @@ the per-stage breakdown.
 | 0     | Scaffold + `RlweParams`              | done   |
 | 1     | Ring arithmetic `R_q`                | done   |
 | 2     | Galois automorphisms `tau_g, tau_h`  | done   |
-| 3     | Lemma 1: trace `Tr(p) = d * c_0`     | todo   |
+| 3     | Lemma 1: trace `Tr(p) = d * c_0`     | done   |
 | 4     | LWE                                  | todo   |
 | 5     | RLWE under `s_tilde`                 | todo   |
 | 6     | Gadget decomposition                 | todo   |

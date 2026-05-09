@@ -1,4 +1,4 @@
-"""Galois automorphisms of R_q = Z_q[X] / (X^d + 1).
+"""Galois automorphisms of R_q = Z_q[X] / (X^d + 1) and the Lemma 1 trace.
 
 The Galois group ``Gal(R_q / Z_q)`` is isomorphic to ``(Z / 2dZ)*`` and, for
 ``d`` a power of 2, has structure ``Z_{d/2} x Z_2``. The two canonical
@@ -20,11 +20,15 @@ in ``[d, 2d)``, it folds back to ``[0, d)`` with a sign flip via the
 negacyclic rule. This single line of reasoning is the algorithmic content
 of every function below.
 
-This module is the conceptual setup for Stage 3 (Lemma 1: the trace) and
-Stage 8 (TRANSFORM uses ``tau`` directly with various ``g`` indices).
+The trace operator ``Tr`` (Stage 3) is the only "non-obvious" function in
+this module; everything else is just primitive Galois machinery. ``Tr`` is
+the conceptual heart of InspiRING -- a constant-term extractor built from
+sums of automorphisms (SPEC.md section 3, Lemma 1).
 """
 
 from __future__ import annotations
+
+from inspiring_oracle.ring import add as _ring_add
 
 G: int = 5
 """SPEC.md section 2: canonical generator of the order-``d/2`` subgroup of Z*_{2d}."""
@@ -84,3 +88,57 @@ def tau_h(p: list[int], q: int) -> list[int]:
     """
     d = len(p)
     return tau(p, h(d), q)
+
+
+# --------------------------------------------------------------------------
+# The trace operator (SPEC.md section 3, Lemma 1)
+# --------------------------------------------------------------------------
+
+
+def half_trace(p: list[int], q: int) -> list[int]:
+    """Compute ``pi_{d/2}(p) := sum_{j=0}^{d/2 - 1} tau_g^j(p)``.
+
+    By SPEC.md Lemma 5 (with ``gamma = d/2``), the result is
+
+        pi_{d/2}(p) = (d/2) * (c_0 + c_{d/2} * X^{d/2})
+
+    -- i.e. positions ``0`` and ``d/2`` of the output equal ``(d/2)*c_0``
+    and ``(d/2)*c_{d/2}`` respectively, and every other position is zero.
+
+    This is the "first half" of the Lemma 1 trace; ``trace`` then folds in
+    a single ``tau_h`` application to cancel the ``X^{d/2}`` coefficient.
+
+    Exposed as a public function because the Lemma 5 intermediate is a
+    powerful firewall for bugs in ``tau``: if ``half_trace`` produces
+    nonzero values at any position other than ``0`` and ``d/2``, the
+    monomial-folding logic in ``tau`` is wrong.
+    """
+    d = len(p)
+    two_d = 2 * d
+    out = [0] * d
+    for j in range(d // 2):
+        gj = pow(G, j, two_d)
+        out = _ring_add(out, tau(p, gj, q), q)
+    return out
+
+
+def trace(p: list[int], q: int) -> list[int]:
+    """The Lemma 1 trace operator: extracts the constant coefficient.
+
+    Defined in SPEC.md section 3 as
+
+        Tr(p) := sum_{j=0}^{d/2 - 1} (tau_g^j(p) + tau_h o tau_g^j(p))
+
+    By Lemma 1 this equals ``d * c_0`` (returned as a constant polynomial:
+    position 0 holds ``d * p[0] mod q``, every other position is zero).
+
+    Implementation note: equivalent to ``half_trace(p) + tau_h(half_trace(p))``
+    by linearity of ``tau_h`` (it factors out of the inner sum). This form
+    uses ``d/2 + 1`` ``tau`` calls instead of ``d`` and matches the proof
+    structure (Lemma 5 + the X^{d/2} cancellation step).
+
+    Stage 8 (TRANSFORM) immediately scales by ``d^{-1} mod q`` to recover
+    just ``c_0`` -- this is why ``RlweParams`` requires ``q`` to be odd.
+    """
+    ht = half_trace(p, q)
+    return _ring_add(ht, tau_h(ht, q), q)
