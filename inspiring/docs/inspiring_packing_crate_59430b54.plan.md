@@ -28,7 +28,7 @@ todos:
     status: completed
   - id: tests
     content: "Implement test suite: Lemma 1, Transform, Aggregate, Collapse, full roundtrip, oracle match, noise (Theorem 2), offline/online equivalence, parameter validation"
-    status: pending
+    status: completed
   - id: benches
     content: Add criterion benchmarks reproducing Table 5 (both parameter sets); produce bench/REPORT.md comparing to paper numbers
     status: pending

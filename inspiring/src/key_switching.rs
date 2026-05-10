@@ -12,7 +12,7 @@
 
 use rand_chacha::ChaCha20Rng;
 use spiral_rs::discrete_gaussian::DiscreteGaussian;
-use spiral_rs::gadget::{build_gadget, gadget_invert_alloc};
+use spiral_rs::gadget::build_gadget;
 use spiral_rs::poly::{
     add_into, from_ntt_alloc, multiply, scalar_multiply_alloc, stack_ntt, to_ntt_alloc, PolyMatrix,
     PolyMatrixNTT, PolyMatrixRaw,
@@ -158,7 +158,7 @@ pub fn ks_switch<'a>(
     // `RlweParams::new`), which is why `KeySwitchingMatrix` carries its own
     // `params` reference rather than letting us infer the width from
     // `K.mat.cols`.
-    let digits_raw = gadget_invert_alloc(params.gadget.ell, &from_ntt_alloc(c1));
+    let digits_raw = signed_gadget_invert_alloc(params, &from_ntt_alloc(c1));
     let digits_ntt = to_ntt_alloc(&digits_raw);
     let mut switched = PolyMatrixNTT::zero(c1.params, 2, 1);
     multiply(&mut switched, &k.mat, &digits_ntt);
@@ -167,6 +167,31 @@ pub fn ks_switch<'a>(
     let mut delta_b = switched.submatrix(1, 0, 1, 1);
     add_into(&mut delta_b, c2);
     (delta_a, delta_b)
+}
+
+fn signed_gadget_invert_alloc<'a>(
+    params: &'a RlweParams,
+    input: &PolyMatrixRaw<'a>,
+) -> PolyMatrixRaw<'a> {
+    assert_eq!(input.rows, 1);
+    assert_eq!(input.cols, 1);
+
+    let mut out = PolyMatrixRaw::zero(&params.spiral, params.gadget.ell, 1);
+    let z = params.gadget.z();
+    let half = z / 2;
+    for coeff_idx in 0..params.d {
+        let mut x = input.get_poly(0, 0)[coeff_idx] % params.q;
+        for digit_idx in 0..params.gadget.ell {
+            let mut digit = (x % z) as i128;
+            if x % z >= half {
+                digit -= z as i128;
+                x += z;
+            }
+            out.get_poly_mut(digit_idx, 0)[coeff_idx] = digit.rem_euclid(params.q as i128) as u64;
+            x /= z;
+        }
+    }
+    out
 }
 
 /// Compute `τ_g^{k-1}(K_g)` from `K_g` without any extra key material.
@@ -218,6 +243,7 @@ mod tests {
     use crate::automorph::tau_g_pow;
     use crate::params::GadgetParams;
     use rand::SeedableRng;
+    use spiral_rs::gadget::gadget_invert_alloc;
     use spiral_rs::poly::PolyMatrix;
 
     // ---- helpers --------------------------------------------------------
@@ -390,6 +416,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn signed_gadget_invert_uses_balanced_digits_and_reconstructs() {
+        let params = params();
+        let input = raw_from_coeffs(&params, &[0, 1, 4, 7, 8, 63, 64, params.q - 1]);
+
+        let digits = signed_gadget_invert_alloc(&params, &input);
+        let z = u128::from(params.gadget.z());
+        let q = u128::from(params.q);
+        for coeff_idx in 0..params.d {
+            let mut acc = 0_u128;
+            for digit_row in 0..params.gadget.ell {
+                acc +=
+                    u128::from(digits.get_poly(digit_row, 0)[coeff_idx]) * z.pow(digit_row as u32);
+            }
+            assert_eq!(
+                input.get_poly(0, 0)[coeff_idx],
+                (acc % q) as u64,
+                "coefficient index {coeff_idx}"
+            );
+        }
+
+        assert_eq!(digits.get_poly(0, 0)[2], params.q - 4);
+        assert_eq!(digits.get_poly(0, 0)[3], params.q - 1);
+    }
+
     // ---- KS round-trip --------------------------------------------------
 
     /// Encrypt a known plaintext under `s_from`, apply `ks_switch` with a
@@ -407,7 +458,10 @@ mod tests {
 
         // c2 = Δ·m − c1·s_from (mod q), so (c1, c2) decrypts to `messages`
         // under s_from with zero noise.
-        let encoded: Vec<_> = messages.iter().map(|m| (params.delta * m) % params.q).collect();
+        let encoded: Vec<_> = messages
+            .iter()
+            .map(|m| (params.delta * m) % params.q)
+            .collect();
         let c2 = sub_poly(&encoded, &negacyclic_mul(&c1, &s_from, params.q), params.q);
 
         let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(0xC0DE_C0DE);
@@ -427,7 +481,12 @@ mod tests {
         let c1_new_raw = from_ntt_alloc(&c1_new);
         let c2_new_raw = from_ntt_alloc(&c2_new);
         assert_eq!(
-            decrypt(&params, c1_new_raw.get_poly(0, 0), c2_new_raw.get_poly(0, 0), &s_to),
+            decrypt(
+                &params,
+                c1_new_raw.get_poly(0, 0),
+                c2_new_raw.get_poly(0, 0),
+                &s_to
+            ),
             messages,
         );
     }
@@ -463,8 +522,15 @@ mod tests {
         let k_image = automorphic_image(&k, t);
 
         // Encrypt `messages` under the rotated source secret with c1.
-        let encoded: Vec<_> = messages.iter().map(|m| (params.delta * m) % params.q).collect();
-        let c2 = sub_poly(&encoded, &negacyclic_mul(&c1, &s_from_rot, params.q), params.q);
+        let encoded: Vec<_> = messages
+            .iter()
+            .map(|m| (params.delta * m) % params.q)
+            .collect();
+        let c2 = sub_poly(
+            &encoded,
+            &negacyclic_mul(&c1, &s_from_rot, params.q),
+            params.q,
+        );
 
         let (c1_new, c2_new) = ks_switch(
             &k_image,
@@ -474,7 +540,12 @@ mod tests {
         let c1_new_raw = from_ntt_alloc(&c1_new);
         let c2_new_raw = from_ntt_alloc(&c2_new);
         assert_eq!(
-            decrypt(&params, c1_new_raw.get_poly(0, 0), c2_new_raw.get_poly(0, 0), &s_to_rot),
+            decrypt(
+                &params,
+                c1_new_raw.get_poly(0, 0),
+                c2_new_raw.get_poly(0, 0),
+                &s_to_rot
+            ),
             messages,
             "ks_switch through automorphic_image(K, t) must decrypt under τ_t(s_to)",
         );
