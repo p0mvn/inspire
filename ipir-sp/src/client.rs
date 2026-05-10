@@ -9,7 +9,9 @@ use inspiring::key_switching::{ks_setup, KeySwitchingMatrix};
 use inspiring::RlweParams;
 use rand::{Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
-use spiral_rs::poly::{to_ntt_alloc, PolyMatrix, PolyMatrixRaw};
+use spiral_rs::poly::{
+    from_ntt_alloc, multiply, to_ntt_alloc, PolyMatrix, PolyMatrixNTT, PolyMatrixRaw,
+};
 
 use crate::bits::u64s_to_contiguous_bytes;
 use crate::modulus_switch::{recover_rlwe_rows, switched_rlwe_response_len};
@@ -368,17 +370,91 @@ fn encrypted_selection_query(
     assert_eq!(offline_query.len(), db_rows / params.d);
 
     let mut query = vec![0u64; db_rows];
+    let secret_ntt = polynomial_to_ntt(params, secret);
     for (block_idx, query_poly) in offline_query.iter().enumerate() {
-        for coeff_idx in 0..params.d {
-            let inner =
-                negacyclic_monomial_inner_product_mod(query_poly, coeff_idx, secret, params.q);
+        let inner_products = query_inner_products_from_ntt(params, query_poly, &secret_ntt);
+        for (coeff_idx, inner) in inner_products.iter().enumerate() {
             let row = block_idx * params.d + coeff_idx;
             let encoded_selection = if row == target_row { params.delta } else { 0 };
-            query[row] = (params.q + encoded_selection - inner) % params.q;
+            query[row] = sub_mod(encoded_selection, *inner, params.q);
         }
     }
 
     query
+}
+
+/// Convert one coefficient-form polynomial into the RLWE NTT domain.
+///
+/// This is used for the fixed client secret during query generation. Inputs are
+/// reduced modulo `q` so callers can pass canonical secrets as well as small
+/// test vectors without relying on upstream normalization.
+fn polynomial_to_ntt<'a>(params: &'a RlweParams, coeffs: &[u64]) -> PolyMatrixNTT<'a> {
+    assert_eq!(coeffs.len(), params.d);
+
+    let mut raw = PolyMatrixRaw::zero(&params.spiral, 1, 1);
+    raw.get_poly_mut(0, 0)
+        .iter_mut()
+        .zip(coeffs)
+        .for_each(|(out, coeff)| *out = coeff % params.q);
+    to_ntt_alloc(&raw)
+}
+
+/// Build `a(X^-1)` in coefficient form and transform it.
+///
+/// The scalar query path computes `<a(X) * X^j, s(X)>` for every shift `j`.
+/// Those values are exactly the coefficients of `a(X^-1) * s(X)` in
+/// `Z_q[X] / (X^d + 1)`, where `X^-i = -X^(d-i)` for non-zero `i`.
+fn inverse_polynomial_to_ntt<'a>(params: &'a RlweParams, coeffs: &[u64]) -> PolyMatrixNTT<'a> {
+    assert_eq!(coeffs.len(), params.d);
+
+    let mut raw = PolyMatrixRaw::zero(&params.spiral, 1, 1);
+    let poly = raw.get_poly_mut(0, 0);
+    poly[0] = coeffs[0] % params.q;
+    for coeff_idx in 1..params.d {
+        let coeff = coeffs[params.d - coeff_idx] % params.q;
+        poly[coeff_idx] = if coeff == 0 { 0 } else { params.q - coeff };
+    }
+
+    to_ntt_alloc(&raw)
+}
+
+/// Compute all scalar query inner products for one public query polynomial.
+///
+/// For a public polynomial `a`, the old scalar path computed
+/// `<a(X) * X^j, s(X)>` independently for every coefficient index `j`.
+/// Algebraically, that whole vector is the coefficient form of
+/// `a(X^-1) * s(X)`. This helper performs that product with one NTT multiply
+/// and returns the same `d` inner products in query-row order.
+fn query_inner_products_from_ntt<'a>(
+    params: &'a RlweParams,
+    query_poly: &[u64],
+    secret_ntt: &PolyMatrixNTT<'a>,
+) -> Vec<u64> {
+    assert_eq!(query_poly.len(), params.d);
+
+    let query_ntt = inverse_polynomial_to_ntt(params, query_poly);
+    let mut product = PolyMatrixNTT::zero(&params.spiral, 1, 1);
+    multiply(&mut product, &query_ntt, secret_ntt);
+    from_ntt_alloc(&product)
+        .get_poly(0, 0)
+        .iter()
+        .map(|coeff| coeff % params.q)
+        .collect()
+}
+
+/// Return `lhs - rhs mod modulus` without widening to `u128`.
+///
+/// Query generation only subtracts already-reduced values (`0`/`delta` and an
+/// inner product modulo `q`), so a branch is enough and avoids reintroducing the
+/// expensive 128-bit modulo helper that dominated the previous client profile.
+fn sub_mod(lhs: u64, rhs: u64, modulus: u64) -> u64 {
+    debug_assert!(lhs < modulus);
+    debug_assert!(rhs < modulus);
+    if lhs >= rhs {
+        lhs - rhs
+    } else {
+        modulus - (rhs - lhs)
+    }
 }
 
 /// Compute `<poly * X^shift, rhs>` in `Z_modulus[X] / (X^d + 1)`.
@@ -392,6 +468,7 @@ fn encrypted_selection_query(
 /// Since query generation only needs the final inner product, this routine
 /// applies that signed index mapping directly and avoids materializing the
 /// shifted polynomial.
+#[cfg(test)]
 fn negacyclic_monomial_inner_product_mod(
     poly: &[u64],
     shift: usize,
@@ -495,6 +572,31 @@ mod tests {
             },
         )
         .expect("valid params")
+    }
+
+    /// Slow reference for the original coefficient-by-coefficient query path.
+    ///
+    /// Production query generation uses the NTT implementation above; tests use
+    /// this helper to prove the optimized path preserves the exact query vector,
+    /// including negacyclic signs and the selected-row `delta` injection.
+    fn scalar_encrypted_selection_query(
+        params: &RlweParams,
+        offline_query: &[Vec<u64>],
+        secret: &[u64],
+        target_row: usize,
+        db_rows: usize,
+    ) -> Vec<u64> {
+        let mut query = vec![0u64; db_rows];
+        for (block_idx, query_poly) in offline_query.iter().enumerate() {
+            for coeff_idx in 0..params.d {
+                let inner =
+                    negacyclic_monomial_inner_product_mod(query_poly, coeff_idx, secret, params.q);
+                let row = block_idx * params.d + coeff_idx;
+                let encoded_selection = if row == target_row { params.delta } else { 0 };
+                query[row] = sub_mod(encoded_selection, inner, params.q);
+            }
+        }
+        query
     }
 
     #[test]
@@ -611,5 +713,39 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn ntt_query_inner_products_match_scalar_monomial_inner_products() {
+        let params = params();
+        let poly = vec![5, 9, 0, 12280, 17, 42, 100, 2];
+        let secret = vec![3, 1, 7, 11, 13, 19, 23, 29];
+
+        let secret_ntt = polynomial_to_ntt(&params, &secret);
+        let inner_products = query_inner_products_from_ntt(&params, &poly, &secret_ntt);
+
+        let expected: Vec<_> = (0..params.d)
+            .map(|shift| negacyclic_monomial_inner_product_mod(&poly, shift, &secret, params.q))
+            .collect();
+        assert_eq!(inner_products, expected);
+    }
+
+    #[test]
+    fn encrypted_selection_query_matches_scalar_reference() {
+        let params = params();
+        let offline_query = vec![
+            vec![5, 9, 0, 12280, 17, 42, 100, 2],
+            vec![3, 1, 4, 1, 5, 9, 2, 6],
+        ];
+        let secret = vec![3, 1, 7, 11, 13, 19, 23, 29];
+        let target_row = 11;
+        let db_rows = offline_query.len() * params.d;
+
+        let query =
+            encrypted_selection_query(&params, &offline_query, &secret, target_row, db_rows);
+        let expected =
+            scalar_encrypted_selection_query(&params, &offline_query, &secret, target_row, db_rows);
+
+        assert_eq!(query, expected);
     }
 }
