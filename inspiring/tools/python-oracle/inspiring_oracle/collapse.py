@@ -51,10 +51,20 @@ new noise ``e_ks`` is added (the ``KS.Switch`` noise from Stage 7).
 
 from __future__ import annotations
 
+from typing import Literal
+
 from inspiring_oracle import key_switching
+from inspiring_oracle.automorph import G, h
 from inspiring_oracle.key_switching import KeySwitchingMatrix
 from inspiring_oracle.params import RlweParams
 from inspiring_oracle.ring import add
+
+# Selector for the "rho" automorphism in CollapseHalf (SPEC.md section 6).
+# "identity" -> rho is the identity (used for the LEFT half of an aggregated
+#               IRCtx: secret pattern s_hat[j] = tau_g^j(s_tilde)).
+# "tau_h"    -> rho = tau_h (used for the RIGHT half: secret pattern
+#               s_hat[j + d/2] = tau_h(tau_g^j(s_tilde))).
+RhoChoice = Literal["identity", "tau_h"]
 
 
 def collapse_one(
@@ -102,3 +112,91 @@ def collapse_one(
     # share s'_{k-1} re-expressed under s'_{k-2}).
     new_a = list(a[: k - 2]) + [add(a[k - 2], delta_a, params.q)]
     return new_a, delta_b
+
+
+def collapse_half(
+    a: list[list[int]],
+    b: list[int],
+    K_g: KeySwitchingMatrix,
+    rho: RhoChoice,
+    params: RlweParams,
+) -> tuple[list[int], list[int]]:
+    """Iteratively ``collapse_one`` an entire half down to a single secret.
+
+    The InspiRING crown jewel: every per-step key-switching matrix is
+    derived from the **single** base matrix ``K_g`` by ``apply_automorph``
+    (Stage 7). No additional ``KS.Setup`` calls; no ``log d`` distinct
+    base matrices like CDKS needs. This is the entire reason InspiRING's
+    KS-matrix count drops from CDKS's ``log d`` to **2** (``K_g`` plus
+    one final ``K_h`` used by ``collapse``, oracle Stage 12).
+
+    Per SPEC.md section 6::
+
+        COLLAPSEHALF((a, b) in R_q^{d/2} x R_q,
+                     K_g = [w_g, y_g] in R_q^{ell x 2},
+                     rho in {identity, tau_h}) -> (a, b) in R_q x R_q:
+            for k = d/2 - 1, d/2 - 2, ..., 1:
+                K_step := rho(tau_g^{k-1}(K_g))
+                (a, b) := COLLAPSEONE((a, b), K_step)
+            return (a, b)
+
+    Args:
+      a: Length-``d/2`` list of length-``d`` polynomials. The "wider
+        random component" of the input ciphertext.
+      b: Length-``d`` polynomial -- the running ``b`` value.
+      K_g: The base key-switching matrix for ``tau_g(s_tilde) -> s_tilde``.
+        Generated once by ``KS.Setup(tau_g(s_tilde), s_tilde, params)``
+        and reused unchanged across both halves.
+      rho:
+        * ``"identity"`` -- input is encrypted under ``s_hat_left``,
+          where ``s_hat_left[j] = tau_g^j(s_tilde)``. Output is under
+          ``s_tilde`` (= ``tau_g^0(s_tilde)``).
+        * ``"tau_h"`` -- input is encrypted under ``s_hat_right``,
+          where ``s_hat_right[j] = tau_h(tau_g^j(s_tilde))``. Output is
+          under ``tau_h(s_tilde)``.
+      params: Ring parameters.
+
+    Returns:
+      ``(a_out, b_out)`` -- both length-``d`` polynomials, encrypted
+      under either ``s_tilde`` (rho = identity) or ``tau_h(s_tilde)``
+      (rho = tau_h). Decryption recovers the same plaintext that the
+      input wider ciphertext encoded.
+
+    Raises:
+      ValueError: if ``len(a) != d/2`` or ``rho`` is not one of the
+      two allowed values.
+
+    Side effect: increments ``key_switching.switch_call_count()`` by
+    exactly ``d/2 - 1`` (one ``KS.Switch`` per ``collapse_one`` step).
+    """
+    d = params.d
+    half = d // 2
+    if len(a) != half:
+        raise ValueError(
+            f"collapse_half expects len(a) = d/2 = {half}, got {len(a)}"
+        )
+    if rho not in ("identity", "tau_h"):
+        raise ValueError(
+            f"rho must be 'identity' or 'tau_h', got {rho!r}"
+        )
+
+    two_d = 2 * d
+    h_d = h(d)
+    cur_a: list[list[int]] = list(a)
+    cur_b: list[int] = list(b)
+
+    # k iterates from d/2 - 1 down to 1.
+    for k in range(half - 1, 0, -1):
+        # Compose the automorphism: tau_g^{k-1} first, then optionally tau_h.
+        # Composition rule: tau_alpha . tau_beta = tau_{(alpha * beta) mod 2d}.
+        g_exp = pow(G, k - 1, two_d)
+        if rho == "tau_h":
+            g_exp = (g_exp * h_d) % two_d
+        K_step = key_switching.apply_automorph(K_g, g_exp, params)
+        cur_a, cur_b = collapse_one(cur_a, cur_b, K_step, params)
+
+    # After the loop cur_a has length 1 (or equals input a if half == 1,
+    # which is impossible for any valid params since d >= 4 -> half >= 2).
+    # Unwrap to expose the single remaining secret share.
+    assert len(cur_a) == 1, f"expected length-1 result, got len {len(cur_a)}"
+    return cur_a[0], cur_b

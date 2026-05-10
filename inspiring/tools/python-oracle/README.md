@@ -32,7 +32,7 @@ the per-stage breakdown.
 | 8     | `TRANSFORM` (LWE -> IRCtx)           | done   |
 | 9     | `aggregate`                          | done   |
 | 10    | `collapse_one`                       | done   |
-| 11    | `collapse_half`                      | todo   |
+| 11    | `collapse_half`                      | done   |
 | 12    | `collapse` (full)                    | todo   |
 | 13    | `pack` (Algorithm 1)                 | todo   |
 | 14    | Empirical Theorem 2 noise check      | todo   |
@@ -46,6 +46,7 @@ This package is managed by [uv](https://docs.astral.sh/uv/). Install uv first
 ```bash
 cd inspiring/tools/python-oracle
 uv sync                                      # creates .venv, installs deps
+uv run ruff check .                         # lint Python sources and tests
 uv run pytest -v                             # run all tests
 uv run pytest -v tests/test_params.py        # one stage at a time
 ```

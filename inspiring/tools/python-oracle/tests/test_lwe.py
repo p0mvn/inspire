@@ -47,7 +47,7 @@ from inspiring_oracle.lwe import (
     keygen,
     sample_noise,
 )
-from inspiring_oracle.params import ORACLE_SMALL, ORACLE_TINY, RlweParams
+from inspiring_oracle.params import ORACLE_SMALL, ORACLE_TINY
 
 
 @pytest.fixture

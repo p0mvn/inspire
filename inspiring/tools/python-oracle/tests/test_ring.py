@@ -340,7 +340,7 @@ class TestMulByXk:
 
     def test_kat_d4(self):
         """Hand-checked at d = 4: shifts and sign-flips of [1, 2, 3, 4]."""
-        d, q = 4, 17
+        q = 17
         a = [1, 2, 3, 4]
         # X^0 -> identity
         assert mul_by_xk(a, 0, q) == [1, 2, 3, 4]

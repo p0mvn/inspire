@@ -185,7 +185,7 @@ def extract_noise(
     By construction, equals the ``e`` sampled inside ``encrypt`` whenever
     every actual noise coefficient satisfies ``|e_k| < q / 2``.
     """
-    q, delta = params.q, params.delta
+    q = params.q
     raw = add(ct.c2, mul(ct.c1, s_tilde, q), q)
     delta_m = _scale_message(m_bar, params)
     e_modq = [(r - dm) % q for r, dm in zip(raw, delta_m, strict=True)]

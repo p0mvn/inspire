@@ -154,7 +154,7 @@ class TestProductCoefficientIdentity:
     def test_kat_d4_explicit(self) -> None:
         # Worked example from the design notes:
         # a = [1, 2, 3, 4], s = [0, 1, 0, 1]; <a, s> = 6.
-        d, q = 4, 12289
+        q = 12289
         a = [1, 2, 3, 4]
         s = [0, 1, 0, 1]
         a_tilde = _a_tilde_oracle(a, q)

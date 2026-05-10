@@ -51,7 +51,6 @@ import pytest
 from inspiring_oracle import lwe, rlwe
 from inspiring_oracle.automorph import G, h, tau
 from inspiring_oracle.key_switching import (
-    KeySwitchingMatrix,
     apply_automorph,
     reset_switch_counter,
     setup,
