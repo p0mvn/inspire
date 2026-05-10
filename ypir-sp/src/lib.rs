@@ -10,5 +10,6 @@
 pub mod bits;
 pub mod modulus_switch;
 pub mod params;
+pub mod server;
 
 pub use params::{params_for_simplepir, YpirSchemeParams};
