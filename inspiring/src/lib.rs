@@ -54,9 +54,14 @@
 //!
 //! - **Nightly Rust** (pinned by `rust-toolchain.toml`): inherited from
 //!   `spiral-rs`'s `#![feature(stdarch_x86_avx512)]`.
-//! - **AVX-512** target feature: required by `spiral-rs`'s NTT inner loops.
-//!   The crate as a whole therefore targets `x86_64-unknown-linux-gnu` (CI)
-//!   and is not portable to `aarch64-*` without a spiral-rs port.
+//! - **AVX-512** target feature: required by `spiral-rs`'s NTT inner loops
+//!   *and* — more subtly — by a correctness bug in `spiral-rs`'s scalar
+//!   `multiply` fallback (see the comment block above the `compile_error!`
+//!   gate in this file, plus `docs/spiral-rs-mapping.md` §1). The crate
+//!   refuses to build without `target_feature = "avx512f"` to make this a
+//!   compile-time error rather than a silent run-time miscomputation. CI
+//!   runs on `x86_64-unknown-linux-gnu`; the crate is not portable to
+//!   `aarch64-*` without a spiral-rs port.
 //!
 //! See [`docs/spiral-rs-mapping.md`] for the full audit of inherited
 //! constraints.
@@ -70,6 +75,73 @@
 // wrong call for skeleton fns that always `unimplemented!()`.
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]
+
+// =============================================================================
+//  Compile-time AVX-512 gate (CORRECTNESS, NOT PERFORMANCE)
+// =============================================================================
+//
+// `inspiring` *requires* the `avx512f` target feature at build time. This is
+// not a performance optimisation — it is a correctness requirement, because
+// the only scalar (non-SIMD) `multiply` path in our pinned `spiral-rs`
+// revision is **silently buggy** for our parameter regime.
+//
+// Pin-point of the upstream bug
+// -----------------------------
+//   `spiral-rs` rev `6929441c6551769b7d099d3af3df347cde3bae7b`
+//   `src/arith.rs:28-33`, function `multiply_add_modular`:
+//
+//       pub fn multiply_add_modular(params: &Params,
+//                                   a: u64, b: u64, x: u64, c: usize) -> u64 {
+//           if params.crt_count == 1 {
+//               return multiply_uint_mod(a, b, params.moduli[c]);  // BUG
+//           }
+//           barrett_coeff_u64(params, a * b + x, c)
+//       }
+//
+// The `crt_count == 1` branch returns `a * b mod q` and **drops the
+// accumulator `x`**. The function is called from `multiply_add_poly`
+// (`src/poly.rs:404`), which is in turn the inner loop of the scalar
+// `multiply(res, a, b)` (`src/poly.rs:543`, gated `cfg(not(target_feature =
+// "avx2"))`). The AVX2 sibling at `src/poly.rs:566` accumulates products in
+// 64-bit lanes and reduces *after* the loop, so it is correct.
+//
+// Net effect on InspiRING: every `KS.Switch` (which multiplies a `[2, ℓ]`
+// key-switching matrix by a `[ℓ, 1]` digit column) silently keeps **only the
+// last gadget term** instead of the gadget sum. For our default gadget the
+// last digit is the high-order base-`z` digit, which is zero for any
+// coefficient `< z^{ℓ-1}` — i.e. every legitimately-bounded ciphertext
+// coefficient. So `KS.Switch` returns the zero polynomial, the cascade
+// `Collapse` step destroys the plaintext, and the only test that exercises a
+// gadget-sum (the full `transform → aggregate → collapse` round-trip) fails
+// while every smaller test passes.
+//
+// `inspiring` runs with `crt_count == 1` (a single `q`, c.f.
+// `RlweParams::new` in `params.rs`), so we hit this branch on every
+// non-AVX2 build. The fix is to ensure the AVX2 / AVX-512 codegen path is
+// always taken, which is what the gate below enforces.
+//
+// Why `avx512f` and not `avx2`
+// ----------------------------
+// `spiral-rs`'s NTT inner loops use `_mm512_*` intrinsics gated on
+// `cfg(target_feature = "avx2")` (the gate is a misnomer — see
+// `docs/spiral-rs-mapping.md` §1). On a host that has AVX2 but not AVX-512,
+// the build succeeds but execution traps with `SIGILL`. Gating on
+// `avx512f` keeps the compile-time check honest about the runtime hardware
+// requirement. `target-cpu=skylake-avx512` (the default in
+// `.cargo/config.toml`) and `target-cpu=native` on any AVX-512 host both
+// satisfy this gate.
+//
+// `docsrs` is exempted because docs.rs's builders don't expose AVX-512 and
+// rustdoc never executes the code anyway.
+#[cfg(not(any(target_feature = "avx512f", docsrs)))]
+compile_error!(
+    "inspiring requires an AVX-512 build (e.g. RUSTFLAGS='-C target-cpu=skylake-avx512' or \
+     '-C target-cpu=native' on an AVX-512 host). This is a correctness requirement, not a \
+     performance one: the scalar fallback in spiral-rs rev 6929441 has a bug in \
+     `arith::multiply_add_modular` for `crt_count == 1` that silently zeroes out KS.Switch \
+     results. See the comment in src/lib.rs above this `compile_error!` and \
+     docs/spiral-rs-mapping.md §1 for the full pin-point."
+);
 
 pub mod automorph;
 pub mod collapse;

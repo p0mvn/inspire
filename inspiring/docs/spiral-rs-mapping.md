@@ -24,10 +24,11 @@ crate inherits these constraints:
 | Constraint | Source | Mitigation |
 |---|---|---|
 | Nightly toolchain required: `#![feature(stdarch_x86_avx512)]` in `lib.rs`. | `spiral-rs/src/lib.rs:1` | `inspiring/rust-toolchain.toml` pins nightly (channel pinned to a date close to the revision's authoring date so behaviour is reproducible). |
-| AVX-512 codegen: NTT inner loops use `_mm512_*` intrinsics behind `#[cfg(target_feature = "avx2")]`, but the actual instructions issued require AVX-512 (the `#[cfg]` gate is a misnomer in this revision). | `spiral-rs/src/ntt.rs` (multiple sites, `_mm512_load_si512`, `_mm512_cmpgt_epu64_mask`, etc.) | `inspiring/.cargo/config.toml` sets `target-cpu=native`. CI runs on `ubuntu-latest` (which supports AVX-512); a non-AVX-512 fallback is *not* in scope for this crate. |
+| AVX-512 codegen: NTT inner loops use `_mm512_*` intrinsics behind `#[cfg(target_feature = "avx2")]`, but the actual instructions issued require AVX-512 (the `#[cfg]` gate is a misnomer in this revision). | `spiral-rs/src/ntt.rs` (multiple sites, `_mm512_load_si512`, `_mm512_cmpgt_epu64_mask`, etc.) | `inspiring/.cargo/config.toml` sets `target-cpu=skylake-avx512`. CI runs on `ubuntu-latest` (which supports AVX-512); a non-AVX-512 fallback is *not* in scope for this crate. |
+| **Scalar fallback `multiply` is silently buggy for `crt_count == 1`** (the regime InspiRING runs in). `arith::multiply_add_modular`'s `crt_count == 1` branch returns `a*b mod q` and **drops the accumulator `x`** — so the `multiply_add_poly` inner loop of `poly::multiply` (`#[cfg(not(target_feature = "avx2"))]`) keeps only the last gadget term instead of the sum. Every `KS.Switch` against a `[ℓ × 1]` digit column then collapses to zero and the full-pipeline `transform → aggregate → collapse` round-trip silently miscomputes. | `spiral-rs/src/arith.rs:28-33` (`multiply_add_modular`), driven from `spiral-rs/src/poly.rs:404` (`multiply_add_poly`) and `spiral-rs/src/poly.rs:543` (scalar `multiply`). The AVX2 sibling at `spiral-rs/src/poly.rs:566` accumulates in `_mm256_add_epi64` and reduces *after* the loop, so it is correct. | `inspiring/src/lib.rs` `compile_error!`s the build unless `target_feature = "avx512f"` is set. `inspiring/.cargo/config.toml` makes `cargo build`/`cargo test` pick that target by default. The non-AVX path is therefore unreachable in `inspiring`. |
 | Memory alignment of polynomial buffers is 64 bytes (`AlignedMemory64`). | `spiral-rs/src/aligned_memory.rs:8` | We always allocate `PolyMatrix*` via spiral-rs constructors (`PolyMatrixRaw::zero`, etc.), never via `Vec<u64>`. |
 
-The README and CI files document these constraints explicitly.
+The README, the `compile_error!` in `src/lib.rs`, and `inspiring/.cargo/config.toml` document these constraints explicitly. The full annotated walk-through of the `multiply_add_modular` failure mode lives in the comment block above the `compile_error!` in `src/lib.rs` — that comment is the single source of truth for *why* the AVX-512 gate is a correctness requirement.
 
 ---
 
@@ -93,17 +94,23 @@ src/automorph.rs
 src/key_switching.rs
     pub struct KeySwitchingMatrix<'a> { /* PolyMatrixNTT inner */ }
 
-    pub fn ks_setup(s_from: &PolyMatrixNTT, s_to: &PolyMatrixNTT,
-                    params: &Params, dg: &DiscreteGaussian,
+    pub fn ks_setup(params: &RlweParams,
+                    s_from: &PolyMatrixNTT, s_to: &PolyMatrixNTT,
                     rng: &mut ChaCha20Rng) -> KeySwitchingMatrix
         // Builds an ℓ-column RLWE encryption of s_from · g_z under s_to.
         // Replicates the body of spiral-rs Client::get_regev_sample so we can
         // pass the secret as a parameter rather than holding it in Client.
+        // Pulls σ_χ, ℓ, and the spiral-rs allocator from `params` (so callers
+        // can never pass mismatched (RlweParams, SpiralParams) pairs).
 
-    pub fn ks_switch(k: &KeySwitchingMatrix, c1: &PolyMatrixNTT,
-                     c2: &PolyMatrixNTT) -> (PolyMatrixNTT, PolyMatrixNTT)
+    pub fn ks_switch(params: &RlweParams, k: &KeySwitchingMatrix,
+                     c1: &PolyMatrixNTT, c2: &PolyMatrixNTT)
+                     -> (PolyMatrixNTT, PolyMatrixNTT)
         // Implements the KS body of server::coefficient_expansion (lines
         // 80-103) abstracted out of the coefficient-expansion loop.
+        // `params.gadget.ell` is the canonical gadget width; the function
+        // asserts `k.mat.cols == params.gadget.ell` so a malformed key matrix
+        // cannot silently miscompute.
 
     pub(crate) fn ks_call_count_inc()
         // #[cfg(test)] only. Increments a thread-local counter so

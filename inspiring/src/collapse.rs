@@ -34,14 +34,18 @@ use crate::params::RlweParams;
 /// automorphic image of the base KS matrix, and produces a state that
 /// has one fewer element. SPEC.md §6 / paper Appendix C.
 ///
-pub fn collapse_one<'a>(state: &mut CollapseState<'a>, k_image: &KeySwitchingMatrix<'_>) {
+pub fn collapse_one<'a>(
+    params: &'a RlweParams,
+    state: &mut CollapseState<'a>,
+    k_image: &KeySwitchingMatrix<'_>,
+) {
     let k = state.a.len();
     assert!(
         k >= 2,
         "collapse::collapse_one requires at least two a components"
     );
 
-    let (delta_a, delta_b) = ks_switch(k_image, &state.a[k - 1], &state.b);
+    let (delta_a, delta_b) = ks_switch(params, k_image, &state.a[k - 1], &state.b);
     add_into(&mut state.a[k - 2], &delta_a);
     state.a.pop();
     state.b = delta_b;
@@ -52,7 +56,11 @@ pub fn collapse_one<'a>(state: &mut CollapseState<'a>, k_image: &KeySwitchingMat
 ///
 /// SPEC.md §6.
 ///
-pub fn collapse_half<'a>(state: &mut CollapseState<'a>, kg_images: &[KeySwitchingMatrix<'_>]) {
+pub fn collapse_half<'a>(
+    params: &'a RlweParams,
+    state: &mut CollapseState<'a>,
+    kg_images: &[KeySwitchingMatrix<'_>],
+) {
     assert_eq!(
         kg_images.len(),
         state.a.len().saturating_sub(1),
@@ -61,7 +69,7 @@ pub fn collapse_half<'a>(state: &mut CollapseState<'a>, kg_images: &[KeySwitchin
 
     while state.a.len() > 1 {
         let image_idx = state.a.len() - 2;
-        collapse_one(state, &kg_images[image_idx]);
+        collapse_one(params, state, &kg_images[image_idx]);
     }
 }
 
@@ -99,7 +107,7 @@ pub fn collapse<'a>(
     let b = to_ntt_alloc(&agg.b_tilde);
 
     let mut left_state = CollapseState { a: left, b };
-    collapse_half(&mut left_state, kg_images_left);
+    collapse_half(params, &mut left_state, kg_images_left);
     let left_a = left_state
         .a
         .pop()
@@ -109,7 +117,7 @@ pub fn collapse<'a>(
         a: right,
         b: left_state.b,
     };
-    collapse_half(&mut right_state, kg_images_right);
+    collapse_half(params, &mut right_state, kg_images_right);
     let right_a = right_state
         .a
         .pop()
@@ -119,7 +127,7 @@ pub fn collapse<'a>(
         a: vec![left_a, right_a],
         b: right_state.b,
     };
-    collapse_one(&mut final_state, kh);
+    collapse_one(params, &mut final_state, kh);
 
     RlweCiphertext {
         inner: stack_ntt(&final_state.a[0], &final_state.b),
@@ -188,7 +196,7 @@ mod tests {
         };
 
         ks_call_count::reset();
-        collapse_one(&mut state, &k);
+        collapse_one(&params, &mut state, &k);
 
         assert_eq!(state.a.len(), 1);
         assert_eq!(ks_call_count::get(), 1);
@@ -207,7 +215,7 @@ mod tests {
         };
 
         ks_call_count::reset();
-        collapse_half(&mut state, &images);
+        collapse_half(&params, &mut state, &images);
 
         assert_eq!(state.a.len(), 1);
         assert_eq!(ks_call_count::get(), (params.d / 2 - 1) as u64);

@@ -1,7 +1,8 @@
 use inspiring::automorph::{h, tau_g_pow};
-use inspiring::collapse::{collapse_one, CollapseState};
-use inspiring::key_switching::{automorphic_image, ks_setup};
-use inspiring::{GadgetParams, RlweParams};
+use inspiring::collapse::{collapse, collapse_one, CollapseState};
+use inspiring::intermediate::{aggregate, transform};
+use inspiring::key_switching::{automorphic_image, ks_setup, KeySwitchingMatrix};
+use inspiring::{GadgetParams, LweCiphertext, RlweParams};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use spiral_rs::poly::{from_ntt_alloc, PolyMatrix, PolyMatrixNTT, PolyMatrixRaw};
@@ -28,6 +29,27 @@ fn raw_from_coeffs<'a>(params: &'a RlweParams, coeffs: &[u64]) -> PolyMatrixRaw<
 
 fn ntt_from_coeffs<'a>(params: &'a RlweParams, coeffs: &[u64]) -> PolyMatrixNTT<'a> {
     raw_from_coeffs(params, coeffs).ntt()
+}
+
+fn noiseless_ks<'a>(
+    params: &'a RlweParams,
+    s_from: &[u64],
+    s_to: &[u64],
+) -> KeySwitchingMatrix<'a> {
+    let mut a = PolyMatrixRaw::zero(&params.spiral, 1, params.gadget.ell);
+    for col in 0..params.gadget.ell {
+        a.get_poly_mut(0, col)[col % params.d] = (col as u64 * 17 + 3) % params.q;
+    }
+    let a_ntt = a.ntt();
+    let s_from_ntt = ntt_from_coeffs(params, s_from);
+    let s_to_ntt = ntt_from_coeffs(params, s_to);
+    let gadget = spiral_rs::gadget::build_gadget(&params.spiral, 1, params.gadget.ell).ntt();
+    let scaled = &s_from_ntt * &gadget;
+    let y = &(&s_to_ntt * &a_ntt) + &scaled;
+
+    KeySwitchingMatrix {
+        mat: spiral_rs::poly::stack_ntt(&(-&a).ntt(), &y),
+    }
 }
 
 fn tau_coeffs(poly: &[u64], exponent: u64, q: u64) -> Vec<u64> {
@@ -78,6 +100,30 @@ fn sub_poly(lhs: &[u64], rhs: &[u64], q: u64) -> Vec<u64> {
     lhs.iter().zip(rhs).map(|(x, y)| (q + x - y) % q).collect()
 }
 
+fn lwe_for_message(params: &RlweParams, a: Vec<u64>, s: &[u64], message: u64) -> LweCiphertext {
+    let inner_product = a.iter().zip(s).fold(0_u64, |acc, (ai, si)| {
+        (acc + (u128::from(*ai) * u128::from(*si) % u128::from(params.q)) as u64) % params.q
+    });
+    let encoded = (params.delta * message) % params.q;
+    let b = (params.q + encoded - inner_product) % params.q;
+
+    LweCiphertext { a, b }
+}
+
+fn decrypt_rlwe(params: &RlweParams, inner: &PolyMatrixNTT<'_>, s_tilde: &[u64]) -> Vec<u64> {
+    let raw = from_ntt_alloc(inner);
+    let decrypted = add_poly(
+        raw.get_poly(1, 0),
+        &negacyclic_mul(raw.get_poly(0, 0), s_tilde, params.q),
+        params.q,
+    );
+
+    decrypted
+        .iter()
+        .map(|coeff| ((coeff + params.delta / 2) / params.delta) % params.p)
+        .collect()
+}
+
 fn decrypt_single_state(
     params: &RlweParams,
     a: &PolyMatrixNTT<'_>,
@@ -119,7 +165,6 @@ fn collapse_one_with_real_key_switching_preserves_plaintext() {
     let mut rng = ChaCha20Rng::seed_from_u64(0xC011A5E);
     let k = ks_setup(
         &params,
-        &params.spiral,
         &ntt_from_coeffs(&params, &s1),
         &ntt_from_coeffs(&params, &s0),
         &mut rng,
@@ -129,7 +174,39 @@ fn collapse_one_with_real_key_switching_preserves_plaintext() {
         b: ntt_from_coeffs(&params, &b),
     };
 
-    collapse_one(&mut state, &k);
+    collapse_one(&params, &mut state, &k);
+
+    assert_eq!(
+        decrypt_single_state(&params, &state.a[0], &state.b, &s0),
+        messages
+    );
+}
+
+#[test]
+fn collapse_one_with_noiseless_key_switching_preserves_plaintext() {
+    let params = params();
+    let s0 = vec![3, 1, 4, 1, 5, 9, 2, 6];
+    let s1 = tau_coeffs(&s0, tau_g_pow(1, params.d), params.q);
+    let a0 = vec![5, 7, 11, 13, 17, 19, 23, 29];
+    let a1 = vec![31, 37, 41, 43, 47, 53, 59, 61];
+    let messages = vec![0, 1, 2, 3, 3, 2, 1, 0];
+    let encoded: Vec<_> = messages
+        .iter()
+        .map(|message| (params.delta * message) % params.q)
+        .collect();
+    let b = sub_poly(
+        &sub_poly(&encoded, &negacyclic_mul(&a0, &s0, params.q), params.q),
+        &negacyclic_mul(&a1, &s1, params.q),
+        params.q,
+    );
+
+    let k = noiseless_ks(&params, &s1, &s0);
+    let mut state = CollapseState {
+        a: vec![ntt_from_coeffs(&params, &a0), ntt_from_coeffs(&params, &a1)],
+        b: ntt_from_coeffs(&params, &b),
+    };
+
+    collapse_one(&params, &mut state, &k);
 
     assert_eq!(
         decrypt_single_state(&params, &state.a[0], &state.b, &s0),
@@ -165,7 +242,6 @@ fn automorphic_key_image_switches_matching_tau_g_secret_pair() {
     let mut rng = ChaCha20Rng::seed_from_u64(0xA70A);
     let kg = ks_setup(
         &params,
-        &params.spiral,
         &ntt_from_coeffs(&params, &s_from_base),
         &ntt_from_coeffs(&params, &s),
         &mut rng,
@@ -176,7 +252,7 @@ fn automorphic_key_image_switches_matching_tau_g_secret_pair() {
         b: ntt_from_coeffs(&params, &b),
     };
 
-    collapse_one(&mut state, &k_image);
+    collapse_one(&params, &mut state, &k_image);
 
     assert_eq!(
         decrypt_single_state(&params, &state.a[0], &state.b, &s0),
@@ -212,7 +288,6 @@ fn tau_h_automorphic_key_image_switches_matching_right_half_secret_pair() {
     let mut rng = ChaCha20Rng::seed_from_u64(0xA70B);
     let kg = ks_setup(
         &params,
-        &params.spiral,
         &ntt_from_coeffs(&params, &s_from_base),
         &ntt_from_coeffs(&params, &s),
         &mut rng,
@@ -223,10 +298,45 @@ fn tau_h_automorphic_key_image_switches_matching_right_half_secret_pair() {
         b: ntt_from_coeffs(&params, &b),
     };
 
-    collapse_one(&mut state, &k_image);
+    collapse_one(&params, &mut state, &k_image);
 
     assert_eq!(
         decrypt_single_state(&params, &state.a[0], &state.b, &s0),
         messages
     );
+}
+
+#[test]
+fn collapse_output_decrypts_under_ternary_base_secret_to_packed_messages() {
+    let params = params();
+    let s_tilde = vec![1, 0, params.q - 1, 1, 0, 1, params.q - 1, 0];
+    let messages = vec![0, 1, 2, 3, 3, 2, 1, 0];
+    let irctxs: Vec<_> = messages
+        .iter()
+        .enumerate()
+        .map(|(row, message)| {
+            let a = (0..params.d)
+                .map(|col| (row * params.d + col + 11) as u64)
+                .collect();
+            transform(&params, &lwe_for_message(&params, a, &s_tilde, *message))
+        })
+        .collect();
+    let agg = aggregate(&params, &irctxs);
+
+    let tau_g_s = tau_coeffs(&s_tilde, tau_g_pow(1, params.d), params.q);
+    let tau_h_s = tau_coeffs(&s_tilde, h(params.d), params.q);
+    let kg = noiseless_ks(&params, &tau_g_s, &s_tilde);
+    let kh = noiseless_ks(&params, &tau_h_s, &s_tilde);
+    let two_d = 2 * params.d as u64;
+    let h_d = h(params.d);
+    let left_images: Vec<_> = (0..(params.d / 2 - 1))
+        .map(|i| automorphic_image(&kg, tau_g_pow(i, params.d)))
+        .collect();
+    let right_images: Vec<_> = (0..(params.d / 2 - 1))
+        .map(|i| automorphic_image(&kg, (tau_g_pow(i, params.d) * h_d) % two_d))
+        .collect();
+
+    let packed = collapse(&params, agg, &left_images, &right_images, &kh);
+
+    assert_eq!(decrypt_rlwe(&params, &packed.inner, &s_tilde), messages);
 }
