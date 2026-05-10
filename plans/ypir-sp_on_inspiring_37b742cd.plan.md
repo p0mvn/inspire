@@ -28,7 +28,7 @@ todos:
     status: completed
   - id: benches
     content: Phase 8 — Criterion benches reproducing YPIR-SP `32768 131072` numbers; REPORT.md comparing offline/online time, key sizes, ||e_pack||_inf vs paper Table 5
-    status: pending
+    status: completed
   - id: docs
     content: Phase 9 — README + MIGRATION.md mapping every YPIR packing API to its `ypir-sp` replacement
     status: pending

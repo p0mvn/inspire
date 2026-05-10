@@ -930,6 +930,7 @@ name = "ypir-sp"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "criterion",
  "env_logger",
  "fastrand",
  "inspiring",
