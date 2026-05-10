@@ -25,7 +25,7 @@ todos:
     status: completed
   - id: offline_online
     content: Wire up PackPreprocessed offline cache and online pack(b, pre) entry point per CRS-model split
-    status: pending
+    status: completed
   - id: tests
     content: "Implement test suite: Lemma 1, Transform, Aggregate, Collapse, full roundtrip, oracle match, noise (Theorem 2), offline/online equivalence, parameter validation"
     status: pending
