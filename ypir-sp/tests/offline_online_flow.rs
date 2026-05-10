@@ -1,3 +1,4 @@
+use inspiring::key_switching::ks_call_count;
 use inspiring::{GadgetParams, RlweParams};
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -30,6 +31,25 @@ fn tiny_ypir() -> YpirSchemeParams {
         instances: 1,
         db_rows: 4,
         db_cols: 8,
+        p: 4,
+        q_prime_1: 16,
+        q_prime_2: 257,
+        q2_bits: 8,
+        t_exp_left: 3,
+        t_exp_right: 2,
+    }
+}
+
+fn tiny_ypir_two_outputs() -> YpirSchemeParams {
+    YpirSchemeParams {
+        num_items: 4,
+        item_size_bits: 16 * 14,
+        poly_len: 8,
+        db_dim_1: 0,
+        db_dim_2: 1,
+        instances: 2,
+        db_rows: 4,
+        db_cols: 16,
         p: 4,
         q_prime_1: 16,
         q_prime_2: 257,
@@ -78,4 +98,30 @@ fn client_keys_drive_server_online_response_serialization() {
         .collect();
 
     assert_eq!(row_1, expected_row_1);
+}
+
+#[test]
+fn online_response_uses_linear_switch_count_per_rlwe_output() {
+    let rlwe = tiny_rlwe();
+    let ypir = tiny_ypir_two_outputs();
+    let server = YServer::new(ypir.clone(), 0u16..64, false, true);
+
+    let secret = ClientSecret::from_coeffs(&rlwe, vec![1, 0, rlwe.q - 1, 1, 0, 1, 0, 0]);
+    let mut rng = ChaCha20Rng::seed_from_u64(0x5151);
+    let hint_0 = vec![0u64; rlwe.d * ypir.db_cols];
+    let offline = offline_precompute_from_hint(&rlwe, &ypir, hint_0);
+    let key_pairs = generate_ks_pairs(&rlwe, &secret, offline.crs_blocks.len(), &mut rng);
+    let pre = build_pack_preprocessed_blocks(&rlwe, &offline.crs_blocks, key_pairs)
+        .expect("preprocessing builds with generated keys");
+
+    ks_call_count::reset();
+    let query = [1, 0, 0, 0];
+    let _response = server
+        .perform_online_computation_simplepir(&rlwe, &query, &pre)
+        .expect("online response serializes");
+
+    assert_eq!(
+        ks_call_count::get(),
+        (offline.crs_blocks.len() * (rlwe.d - 1)) as u64
+    );
 }
