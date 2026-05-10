@@ -25,7 +25,7 @@ todos:
     status: completed
   - id: tests
     content: "Phase 7 — Tests: pack_replaces_cdks (full e2e), linear_cascade_count (d-1 switches), noise_within_theorem2, mod_switch_roundtrip, crs_block_extraction"
-    status: pending
+    status: completed
   - id: benches
     content: Phase 8 — Criterion benches reproducing YPIR-SP `32768 131072` numbers; REPORT.md comparing offline/online time, key sizes, ||e_pack||_inf vs paper Table 5
     status: pending

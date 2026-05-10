@@ -102,6 +102,34 @@ fn decode_rows(params: &RlweParams, row_0: &[u64], row_1: &[u64], secret: &[u64]
         .collect()
 }
 
+fn encrypted_selection_query(
+    params: &RlweParams,
+    offline_query: &[Vec<u64>],
+    secret: &[u64],
+    target_row: usize,
+    db_rows: usize,
+) -> Vec<u64> {
+    assert_eq!(db_rows % params.d, 0);
+    assert_eq!(offline_query.len(), db_rows / params.d);
+
+    let mut query = vec![0u64; db_rows];
+    for (block_idx, query_poly) in offline_query.iter().enumerate() {
+        for coeff_idx in 0..params.d {
+            let mut basis = vec![0u64; params.d];
+            basis[coeff_idx] = 1;
+            let a_row = negacyclic_mul(query_poly, &basis, params.q);
+            let inner = a_row.iter().zip(secret).fold(0u64, |acc, (a, s)| {
+                ((u128::from(acc) + u128::from(*a) * u128::from(*s)) % u128::from(params.q)) as u64
+            });
+            let row = block_idx * params.d + coeff_idx;
+            let encoded_selection = if row == target_row { params.delta } else { 0 };
+            query[row] = (params.q + encoded_selection - inner) % params.q;
+        }
+    }
+
+    query
+}
+
 #[test]
 fn client_keys_drive_server_online_response_serialization() {
     let rlwe = tiny_rlwe();
@@ -246,6 +274,57 @@ fn mocked_db_query_decodes_exact_expected_row_bytes() {
         let (row_0, row_1) =
             recover_rlwe_rows(chunk, rlwe.d, ypir.q_prime_1, ypir.q_prime_2, rlwe.q);
         decoded.extend(decode_rows(&rlwe, &row_0, &row_1, &zero_secret.coeffs));
+    }
+
+    let expected = db_bytes[target_row * ypir.db_cols..(target_row + 1) * ypir.db_cols].to_vec();
+    assert_eq!(decoded, expected);
+}
+
+#[test]
+fn encrypted_pir_query_decodes_exact_expected_row_bytes() {
+    let rlwe = tiny_rlwe();
+    let mut ypir = tiny_ypir_two_outputs();
+    ypir.num_items = 8;
+    ypir.db_rows = 8;
+    ypir.q_prime_1 = rlwe.q;
+    ypir.q_prime_2 = rlwe.q;
+
+    let db_bytes: Vec<u8> = (0..ypir.db_rows)
+        .flat_map(|row| (0..ypir.db_cols).map(move |col| ((row + col * 2) % 4) as u8))
+        .collect();
+    let server = YServer::new(
+        ypir.clone(),
+        db_bytes.iter().map(|byte| u64::from(*byte)),
+        false,
+        true,
+    );
+
+    let secret = ClientSecret::from_coeffs(&rlwe, vec![1, 0, rlwe.q - 1, 1, 0, 1, 0, 0]);
+    let offline_query = vec![vec![2, 1, 0, 3, 1, 0, 2, 1]];
+    let offline = server.perform_offline_precomputation_simplepir(&rlwe, &offline_query);
+    let mut rng = ChaCha20Rng::seed_from_u64(0xE2E1);
+    let key_pairs = generate_ks_pairs(&rlwe, &secret, offline.crs_blocks.len(), &mut rng);
+    let pre = build_pack_preprocessed_blocks(&rlwe, &offline.crs_blocks, key_pairs)
+        .expect("preprocessing builds");
+
+    let target_row = 5;
+    let query = encrypted_selection_query(
+        &rlwe,
+        &offline_query,
+        &secret.coeffs,
+        target_row,
+        ypir.db_rows,
+    );
+    let response = server
+        .perform_online_computation_simplepir(&rlwe, &query, &pre)
+        .expect("online response serializes");
+
+    let response_len = switched_rlwe_response_len(rlwe.d, ypir.q_prime_1, ypir.q_prime_2);
+    let mut decoded = Vec::with_capacity(ypir.db_cols);
+    for chunk in response.chunks_exact(response_len) {
+        let (row_0, row_1) =
+            recover_rlwe_rows(chunk, rlwe.d, ypir.q_prime_1, ypir.q_prime_2, rlwe.q);
+        decoded.extend(decode_rows(&rlwe, &row_0, &row_1, &secret.coeffs));
     }
 
     let expected = db_bytes[target_row * ypir.db_cols..(target_row + 1) * ypir.db_cols].to_vec();
