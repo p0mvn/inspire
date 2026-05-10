@@ -1,15 +1,15 @@
-//! Phase 4 placeholder. Confirms the public API surface compiles; every
-//! assertion here is a no-op against the stubs that Phase 5+ will replace.
+//! Confirms the public API surface compiles as implementation phases replace
+//! the original skeleton stubs.
 //!
 //! The full Phase 9 test suite (`tests/lemma1_trace.rs`,
 //! `tests/transform_correctness.rs`, …, `tests/inspiring_vs_cdks_recursion.rs`)
 //! supersedes this file.
 
-use inspiring::{GadgetParams, InspiringError, RlweParams};
+use inspiring::{GadgetParams, RlweParams};
 
 #[test]
 fn public_api_surface_is_wired_up() {
-    let err = RlweParams::new(
+    let params = RlweParams::new(
         8,
         12289,
         4,
@@ -19,10 +19,11 @@ fn public_api_surface_is_wired_up() {
             ell: 5,
         },
     )
-    .expect_err("Phase 4 stub must return an error");
+    .expect("Stage 1 parameters should construct");
 
-    assert!(
-        matches!(err, InspiringError::Internal(_)),
-        "expected Internal stub variant, got {err:?}",
-    );
+    assert_eq!(params.d, 8);
+    assert_eq!(params.q, 12289);
+    assert_eq!(params.p, 4);
+    assert_eq!(params.delta, 3072);
+    assert_eq!((params.d as u64 * params.d_inv) % params.q, 1);
 }

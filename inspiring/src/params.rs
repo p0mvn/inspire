@@ -3,11 +3,11 @@
 //! See [SPEC.md §1](../../SPEC.md) for the symbol table this module mirrors.
 //! Every public field is paper-named, every constraint is paper-justified.
 //!
-//! Phase 4 status: declarations and validators only. Phase 5+ phases attach
-//! NTT tables and convert this struct into a [`spiral_rs::params::Params`]
-//! for the underlying ring arithmetic.
+//! Stage 1 status: validators, cached arithmetic constants, and backing
+//! [`spiral_rs::params::Params`] construction are implemented.
 
-use spiral_rs::params::Params as SpiralParams;
+use spiral_rs::gadget::get_bits_per;
+use spiral_rs::params::{Params as SpiralParams, MIN_Q2_BITS};
 
 use crate::error::InspiringError;
 
@@ -65,6 +65,8 @@ pub struct RlweParams {
     pub delta: u64,
     /// Cached `d^{-1} mod q`.
     pub d_inv: u64,
+    /// Backing `spiral-rs` parameters used by polynomial allocators.
+    pub spiral: SpiralParams,
 }
 
 impl RlweParams {
@@ -78,18 +80,95 @@ impl RlweParams {
     /// - `gadget.bits_per` matches what `spiral_rs::gadget::get_bits_per`
     ///   would return — see `docs/spiral-rs-mapping.md` §2.
     ///
-    /// Phase 4 status: declarations only. Body is a stub; Phase 5
-    /// implements the validator and computes `delta`, `d_inv`.
     pub fn new(
-        _d: usize,
-        _q: u64,
-        _p: u64,
-        _sigma_chi: f64,
-        _gadget: GadgetParams,
+        d: usize,
+        q: u64,
+        p: u64,
+        sigma_chi: f64,
+        gadget: GadgetParams,
     ) -> Result<Self, InspiringError> {
-        Err(InspiringError::Internal(
-            "RlweParams::new not yet implemented (Phase 5)",
-        ))
+        if d < 2 || !d.is_power_of_two() {
+            return Err(InspiringError::InvalidParams(format!(
+                "d must be a power of two greater than 1, got {d}"
+            )));
+        }
+        if q < 3 || q % 2 == 0 {
+            return Err(InspiringError::InvalidParams(format!(
+                "q must be odd and at least 3, got {q}"
+            )));
+        }
+        if p < 2 || p > q {
+            return Err(InspiringError::InvalidParams(format!(
+                "p must satisfy 2 <= p <= q, got p={p}, q={q}"
+            )));
+        }
+        if !sigma_chi.is_finite() || sigma_chi <= 0.0 {
+            return Err(InspiringError::InvalidParams(format!(
+                "sigma_chi must be positive and finite, got {sigma_chi}"
+            )));
+        }
+        if gadget.bits_per == 0 || gadget.bits_per >= u64::BITS {
+            return Err(InspiringError::InvalidParams(format!(
+                "gadget.bits_per must be in [1, 63], got {}",
+                gadget.bits_per
+            )));
+        }
+        if gadget.ell == 0 {
+            return Err(InspiringError::InvalidParams(
+                "gadget.ell must be non-zero".to_string(),
+            ));
+        }
+
+        let coverage = (1u128 << gadget.bits_per).saturating_pow(gadget.ell as u32);
+        if coverage < u128::from(q) {
+            return Err(InspiringError::InvalidParams(format!(
+                "gadget base z={} with ell={} does not cover q={q}",
+                gadget.z(),
+                gadget.ell
+            )));
+        }
+
+        let d_inv = mod_inverse(d as u64, q).ok_or_else(|| {
+            InspiringError::InvalidParams(format!("d={d} is not invertible modulo q={q}"))
+        })?;
+        let delta = q / p;
+        let noise_width = sigma_chi * std::f64::consts::TAU.sqrt();
+        let spiral = SpiralParams::init(
+            d,
+            &[q],
+            noise_width,
+            1,
+            p,
+            MIN_Q2_BITS,
+            gadget.ell,
+            gadget.ell,
+            gadget.ell,
+            gadget.ell,
+            false,
+            0,
+            0,
+            1,
+            d,
+            0,
+        );
+        let spiral_bits_per = get_bits_per(&spiral, gadget.ell) as u32;
+        if spiral_bits_per != gadget.bits_per {
+            return Err(InspiringError::InvalidParams(format!(
+                "gadget.bits_per={} does not match spiral-rs bits_per={} for q={} and ell={}",
+                gadget.bits_per, spiral_bits_per, q, gadget.ell
+            )));
+        }
+
+        Ok(Self {
+            d,
+            q,
+            p,
+            sigma_chi,
+            gadget,
+            delta,
+            d_inv,
+            spiral,
+        })
     }
 
     /// Convert to a [`spiral_rs::params::Params`] suitable for passing into
@@ -97,9 +176,116 @@ impl RlweParams {
     /// (`t_conv`, `t_gsw`, `db_dim_*`, …) are filled with safe no-op
     /// defaults documented in [`docs/spiral-rs-mapping.md` §4](../../docs/spiral-rs-mapping.md).
     ///
-    /// Phase 4 status: stub.
     #[must_use = "the spiral-rs Params must be plumbed into PolyMatrix* allocators"]
     pub fn to_spiral_params(&self) -> SpiralParams {
-        unimplemented!("RlweParams::to_spiral_params is implemented in Phase 5")
+        self.spiral.clone()
+    }
+}
+
+fn mod_inverse(a: u64, modulus: u64) -> Option<u64> {
+    let (mut old_r, mut r) = (i128::from(modulus), i128::from(a % modulus));
+    let (mut old_s, mut s) = (0_i128, 1_i128);
+
+    while r != 0 {
+        let quotient = old_r / r;
+        (old_r, r) = (r, old_r - quotient * r);
+        (old_s, s) = (s, old_s - quotient * s);
+    }
+
+    (old_r == 1).then(|| old_s.rem_euclid(i128::from(modulus)) as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gadget() -> GadgetParams {
+        GadgetParams {
+            bits_per: 3,
+            ell: 5,
+        }
+    }
+
+    #[test]
+    fn gadget_params_z_returns_power_of_two_base() {
+        assert_eq!(gadget().z(), 8);
+    }
+
+    #[test]
+    fn new_accepts_valid_parameters_and_caches_derived_values() {
+        let params = RlweParams::new(8, 12289, 4, 3.2, gadget()).expect("valid params");
+
+        assert_eq!(params.d, 8);
+        assert_eq!(params.q, 12289);
+        assert_eq!(params.p, 4);
+        assert_eq!(params.delta, 3072);
+        assert_eq!((params.d as u64 * params.d_inv) % params.q, 1);
+        assert_eq!(params.spiral.poly_len, params.d);
+        assert_eq!(params.spiral.modulus, params.q);
+        assert_eq!(params.spiral.pt_modulus, params.p);
+    }
+
+    #[test]
+    fn new_rejects_invalid_parameters() {
+        assert!(RlweParams::new(7, 12289, 4, 3.2, gadget()).is_err());
+        assert!(RlweParams::new(8, 12288, 4, 3.2, gadget()).is_err());
+        assert!(RlweParams::new(8, 12289, 1, 3.2, gadget()).is_err());
+        assert!(RlweParams::new(8, 12289, 12290, 3.2, gadget()).is_err());
+        assert!(RlweParams::new(8, 12289, 4, 0.0, gadget()).is_err());
+        assert!(RlweParams::new(8, 12289, 4, f64::NAN, gadget()).is_err());
+        assert!(RlweParams::new(
+            8,
+            12289,
+            4,
+            3.2,
+            GadgetParams {
+                bits_per: 0,
+                ell: 5,
+            },
+        )
+        .is_err());
+        assert!(RlweParams::new(
+            8,
+            12289,
+            4,
+            3.2,
+            GadgetParams {
+                bits_per: 3,
+                ell: 0,
+            },
+        )
+        .is_err());
+        assert!(RlweParams::new(
+            8,
+            12289,
+            4,
+            3.2,
+            GadgetParams {
+                bits_per: 2,
+                ell: 5,
+            },
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn to_spiral_params_returns_matching_backing_params() {
+        let params = RlweParams::new(8, 12289, 4, 3.2, gadget()).expect("valid params");
+        let spiral = params.to_spiral_params();
+
+        assert_eq!(spiral.poly_len, 8);
+        assert_eq!(spiral.modulus, 12289);
+        assert_eq!(spiral.pt_modulus, 4);
+    }
+
+    #[test]
+    fn mod_inverse_returns_inverse_when_it_exists() {
+        assert_eq!(mod_inverse(8, 12289), Some(10753));
+        assert_eq!((8 * mod_inverse(8, 12289).unwrap()) % 12289, 1);
+    }
+
+    #[test]
+    fn mod_inverse_returns_none_when_not_coprime() {
+        assert_eq!(mod_inverse(8, 12288), None);
     }
 }
