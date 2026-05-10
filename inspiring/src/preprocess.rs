@@ -19,7 +19,10 @@ use spiral_rs::poly::{
     PolyMatrixRaw,
 };
 
-use crate::automorph::{h, tau_g_pow, tau_ntt};
+use crate::automorph::{
+    apply_tau_ntt_alloc, apply_tau_ntt_double_into, h, tau_g_pow, tau_g_power_tables,
+    NttAutomorphTable,
+};
 use crate::collapse::{
     collapse_one, collapse_with_digits, precompute_collapse_affine, CollapseState,
 };
@@ -105,7 +108,14 @@ pub struct ExpandedPackingKeys<'a> {
     pub kh: KeySwitchingMatrix<'a>,
 }
 
-/// Public fixed top-row images for packing-key expansion.
+/// Public fixed top-row images and NTT automorphism tables for packing-key
+/// expansion.
+///
+/// Reference-compatible requests upload only the secret-dependent `K_g` and
+/// `K_h` body rows. The public top rows are derived from fixed seeds on both
+/// the client and server. This cache holds the top-row automorphic images and
+/// the matching NTT slot tables needed to expand uploaded `K_g` bodies without
+/// performing an inverse/forward NTT pair for every image.
 pub struct TopKeyImages<'a> {
     /// Fixed top rows for left-half `K_g` images.
     pub kg_top_left: Vec<PolyMatrixNTT<'a>>,
@@ -113,6 +123,14 @@ pub struct TopKeyImages<'a> {
     pub kg_top_right: Vec<PolyMatrixNTT<'a>>,
     /// Fixed top row for the final `K_h` matrix.
     pub kh_top: PolyMatrixNTT<'a>,
+    /// NTT slot tables for uploaded left-half `K_g` body images.
+    ///
+    /// Entry `i` applies `τ_g^i` to the uploaded `y_body`.
+    pub kg_body_left_tables: Vec<NttAutomorphTable>,
+    /// NTT slot tables for uploaded right-half `K_g` body images.
+    ///
+    /// Entry `i` applies `τ_g^i ∘ τ_h` to the uploaded `y_body`.
+    pub kg_body_right_tables: Vec<NttAutomorphTable>,
 }
 
 /// Public/static packing precomputation for one CRS block.
@@ -268,7 +286,18 @@ impl<'a> PackingKeys<'a> {
         self.expand_with_top_images(params, &top_images)
     }
 
-    /// Expand uploaded reference key bodies using precomputed fixed top rows.
+    /// Expand uploaded reference key bodies using precomputed fixed top rows
+    /// and NTT-domain body automorphism tables.
+    ///
+    /// The uploaded `K_g` body is expanded into the two `d/2 - 1` image
+    /// families required by the collapse. This method is intentionally
+    /// once-per-request: the expanded images are shared by every CRS/output
+    /// block packed for that request.
+    ///
+    /// The fixed top rows come from [`TopKeyImages`]. The secret-dependent body
+    /// rows are transformed with slot permutations, mirroring the upstream
+    /// InsPIRe `generate_rotations_double` path and avoiding thousands of
+    /// coefficient-domain automorphism round trips.
     pub fn expand_with_top_images(
         &self,
         params: &'a RlweParams,
@@ -289,38 +318,38 @@ impl<'a> PackingKeys<'a> {
         };
         let restore_kh_us = restore_kh_started.elapsed().as_micros();
 
-        let two_d = 2 * params.d as u64;
-        let h_d = h(params.d);
-        let left_started = std::time::Instant::now();
-        let kg_images_left: Vec<_> = (0..(params.d / 2 - 1))
-            .map(|i| {
-                let body = tau_ntt(&self.y_body, tau_g_pow(i, params.d));
-                KeySwitchingMatrix {
-                    mat: stack_ntt(&top_images.kg_top_left[i], &body),
-                    params,
-                }
-            })
-            .collect();
-        let kg_left_images_us = left_started.elapsed().as_micros();
-
-        let right_started = std::time::Instant::now();
-        let kg_images_right: Vec<_> = (0..(params.d / 2 - 1))
-            .map(|i| {
-                let body = tau_ntt(&self.y_body, (tau_g_pow(i, params.d) * h_d) % two_d);
-                KeySwitchingMatrix {
-                    mat: stack_ntt(&top_images.kg_top_right[i], &body),
-                    params,
-                }
-            })
-            .collect();
-        let kg_right_images_us = right_started.elapsed().as_micros();
+        let body_images_started = std::time::Instant::now();
+        let image_count = params.d / 2 - 1;
+        let mut kg_images_left = Vec::with_capacity(image_count);
+        let mut kg_images_right = Vec::with_capacity(image_count);
+        for i in 0..image_count {
+            let mut left_body = PolyMatrixNTT::zero(&params.spiral, 1, params.gadget.ell);
+            let mut right_body = PolyMatrixNTT::zero(&params.spiral, 1, params.gadget.ell);
+            apply_tau_ntt_double_into(
+                &mut left_body,
+                &mut right_body,
+                &self.y_body,
+                &top_images.kg_body_left_tables[i],
+                &top_images.kg_body_right_tables[i],
+            );
+            kg_images_left.push(KeySwitchingMatrix {
+                mat: stack_ntt(&top_images.kg_top_left[i], &left_body),
+                params,
+            });
+            kg_images_right.push(KeySwitchingMatrix {
+                mat: stack_ntt(&top_images.kg_top_right[i], &right_body),
+                params,
+            });
+        }
+        let kg_body_images_us = body_images_started.elapsed().as_micros();
 
         eprintln!(
-            "packing_key_expand_breakdown_us total={} restore_kh={} kg_left_body_images={} kg_right_body_images={} left_count={} right_count={}",
+            "packing_key_expand_breakdown_us total={} restore_kh={} kg_left_body_images={} kg_right_body_images={} kg_fused_body_images={} left_count={} right_count={}",
             total_started.elapsed().as_micros(),
             restore_kh_us,
-            kg_left_images_us,
-            kg_right_images_us,
+            kg_body_images_us,
+            0,
+            kg_body_images_us,
             kg_images_left.len(),
             kg_images_right.len(),
         );
@@ -398,23 +427,34 @@ impl<'a> QueryPackPreprocessed<'a> {
 }
 
 impl<'a> TopKeyImages<'a> {
-    /// Build fixed public top-row key images from reference seeds.
+    /// Build fixed public top-row key images and body automorphism tables from
+    /// reference seeds.
+    ///
+    /// Servers should construct this once for an [`RlweParams`] instance and
+    /// reuse it for every reference-compatible request. At `d = 2048`, this
+    /// moves the NTT slot-table discovery and top-row image generation out of
+    /// the online query path; request-time expansion only copies NTT slots for
+    /// the uploaded body rows and stacks them with these cached top rows.
     pub fn build(params: &'a RlweParams) -> Self {
         let kg_top = reference_mask_top(params, REFERENCE_W_SEED);
         let kh_top = reference_mask_top(params, REFERENCE_V_SEED);
-        let two_d = 2 * params.d as u64;
-        let h_d = h(params.d);
-        let kg_top_left = (0..(params.d / 2 - 1))
-            .map(|i| tau_ntt(&kg_top, tau_g_pow(i, params.d)))
+        let (kg_body_left_tables, kg_body_right_tables) =
+            tau_g_power_tables(params, params.d / 2 - 1);
+        let kg_top_left = kg_body_left_tables
+            .iter()
+            .map(|table| apply_tau_ntt_alloc(&kg_top, table))
             .collect();
-        let kg_top_right = (0..(params.d / 2 - 1))
-            .map(|i| tau_ntt(&kg_top, (tau_g_pow(i, params.d) * h_d) % two_d))
+        let kg_top_right = kg_body_right_tables
+            .iter()
+            .map(|table| apply_tau_ntt_alloc(&kg_top, table))
             .collect();
 
         Self {
             kg_top_left,
             kg_top_right,
             kh_top,
+            kg_body_left_tables,
+            kg_body_right_tables,
         }
     }
 
@@ -432,16 +472,42 @@ impl<'a> TopKeyImages<'a> {
                 self.kg_top_right.len()
             )));
         }
+        if self.kg_body_left_tables.len() != expected {
+            return Err(InspiringError::PreprocessMismatch(format!(
+                "expected {expected} left K_g body tables, got {}",
+                self.kg_body_left_tables.len()
+            )));
+        }
+        if self.kg_body_right_tables.len() != expected {
+            return Err(InspiringError::PreprocessMismatch(format!(
+                "expected {expected} right K_g body tables, got {}",
+                self.kg_body_right_tables.len()
+            )));
+        }
         validate_reference_body(params, &self.kh_top, "reference kh top")?;
         for (idx, top) in self.kg_top_left.iter().enumerate() {
             validate_reference_body(params, top, "reference left kg top").map_err(|err| {
                 InspiringError::PreprocessMismatch(format!("left K_g top image {idx}: {err}"))
             })?;
+            if self.kg_body_left_tables[idx].indices().len() != params.d {
+                return Err(InspiringError::PreprocessMismatch(format!(
+                    "left K_g body table {idx} has length {}, expected {}",
+                    self.kg_body_left_tables[idx].indices().len(),
+                    params.d
+                )));
+            }
         }
         for (idx, top) in self.kg_top_right.iter().enumerate() {
             validate_reference_body(params, top, "reference right kg top").map_err(|err| {
                 InspiringError::PreprocessMismatch(format!("right K_g top image {idx}: {err}"))
             })?;
+            if self.kg_body_right_tables[idx].indices().len() != params.d {
+                return Err(InspiringError::PreprocessMismatch(format!(
+                    "right K_g body table {idx} has length {}, expected {}",
+                    self.kg_body_right_tables[idx].indices().len(),
+                    params.d
+                )));
+            }
         }
         Ok(())
     }
@@ -711,5 +777,26 @@ mod tests {
             PackPreprocessed::build(&params, &wrong, &kg, &kh),
             Err(InspiringError::PreprocessMismatch(_))
         ));
+    }
+
+    #[test]
+    fn top_key_images_cache_matching_body_automorphism_tables() {
+        let params = params();
+        let kg_top = reference_mask_top(&params, REFERENCE_W_SEED);
+        let images = TopKeyImages::build(&params);
+        let two_d = 2 * params.d as u64;
+        let h_d = h(params.d);
+
+        for i in 0..(params.d / 2 - 1) {
+            let left_exp = tau_g_pow(i, params.d);
+            let right_exp = (left_exp * h_d) % two_d;
+            let expected_left = crate::automorph::tau_ntt(&kg_top, left_exp);
+            let expected_right = crate::automorph::tau_ntt(&kg_top, right_exp);
+
+            assert_eq!(images.kg_body_left_tables[i].exponent(), left_exp);
+            assert_eq!(images.kg_body_right_tables[i].exponent(), right_exp);
+            assert_eq!(images.kg_top_left[i].as_slice(), expected_left.as_slice());
+            assert_eq!(images.kg_top_right[i].as_slice(), expected_right.as_slice());
+        }
     }
 }
