@@ -21,6 +21,20 @@ fn tiny_rlwe() -> RlweParams {
     .expect("valid params")
 }
 
+fn tiny_byte_rlwe() -> RlweParams {
+    RlweParams::new(
+        8,
+        12289,
+        256,
+        0.1,
+        GadgetParams {
+            bits_per: 3,
+            ell: 5,
+        },
+    )
+    .expect("valid byte params")
+}
+
 fn tiny_ypir() -> YpirSchemeParams {
     YpirSchemeParams {
         num_items: 4,
@@ -57,6 +71,35 @@ fn tiny_ypir_two_outputs() -> YpirSchemeParams {
         t_exp_left: 3,
         t_exp_right: 2,
     }
+}
+
+fn add_poly(lhs: &[u64], rhs: &[u64], q: u64) -> Vec<u64> {
+    lhs.iter().zip(rhs).map(|(x, y)| (x + y) % q).collect()
+}
+
+fn negacyclic_mul(lhs: &[u64], rhs: &[u64], q: u64) -> Vec<u64> {
+    let d = lhs.len();
+    let mut out = vec![0; d];
+    for (i, lhs_coeff) in lhs.iter().enumerate() {
+        for (j, rhs_coeff) in rhs.iter().enumerate() {
+            let product = (u128::from(*lhs_coeff) * u128::from(*rhs_coeff) % u128::from(q)) as u64;
+            let degree = i + j;
+            if degree < d {
+                out[degree] = (out[degree] + product) % q;
+            } else if product != 0 {
+                out[degree - d] = (out[degree - d] + q - product) % q;
+            }
+        }
+    }
+    out
+}
+
+fn decode_rows(params: &RlweParams, row_0: &[u64], row_1: &[u64], secret: &[u64]) -> Vec<u8> {
+    let phase = add_poly(row_1, &negacyclic_mul(row_0, secret, params.q), params.q);
+    phase
+        .iter()
+        .map(|coeff| (((coeff + params.delta / 2) / params.delta) % params.p) as u8)
+        .collect()
 }
 
 #[test]
@@ -161,4 +204,50 @@ fn generated_offline_hint_feeds_preprocessing_and_online_response() {
         response.len(),
         2 * switched_rlwe_response_len(rlwe.d, ypir.q_prime_1, ypir.q_prime_2)
     );
+}
+
+#[test]
+fn mocked_db_query_decodes_exact_expected_row_bytes() {
+    let rlwe = tiny_byte_rlwe();
+    let mut ypir = tiny_ypir_two_outputs();
+    ypir.num_items = 8;
+    ypir.db_rows = 8;
+    ypir.p = 256;
+    ypir.q_prime_1 = rlwe.q;
+    ypir.q_prime_2 = rlwe.q;
+
+    let db_bytes: Vec<u8> = (0..ypir.db_rows)
+        .flat_map(|row| (0..ypir.db_cols).map(move |col| (row * 17 + col * 3) as u8))
+        .collect();
+    let encoded_db = db_bytes
+        .iter()
+        .map(|byte| rlwe.delta * u64::from(*byte))
+        .collect::<Vec<_>>();
+    let server = YServer::new(ypir.clone(), encoded_db.into_iter(), false, true);
+
+    let zero_secret = ClientSecret::from_coeffs(&rlwe, vec![0; rlwe.d]);
+    let offline_query = vec![vec![1, 0, 0, 0, 0, 0, 0, 0]];
+    let offline = server.perform_offline_precomputation_simplepir(&rlwe, &offline_query);
+    let mut rng = ChaCha20Rng::seed_from_u64(0xE2E);
+    let key_pairs = generate_ks_pairs(&rlwe, &zero_secret, offline.crs_blocks.len(), &mut rng);
+    let pre = build_pack_preprocessed_blocks(&rlwe, &offline.crs_blocks, key_pairs)
+        .expect("preprocessing builds");
+
+    let target_row = 3;
+    let mut query = vec![0u64; ypir.db_rows];
+    query[target_row] = 1;
+    let response = server
+        .perform_online_computation_simplepir(&rlwe, &query, &pre)
+        .expect("online response serializes");
+
+    let response_len = switched_rlwe_response_len(rlwe.d, ypir.q_prime_1, ypir.q_prime_2);
+    let mut decoded = Vec::with_capacity(ypir.db_cols);
+    for chunk in response.chunks_exact(response_len) {
+        let (row_0, row_1) =
+            recover_rlwe_rows(chunk, rlwe.d, ypir.q_prime_1, ypir.q_prime_2, rlwe.q);
+        decoded.extend(decode_rows(&rlwe, &row_0, &row_1, &zero_secret.coeffs));
+    }
+
+    let expected = db_bytes[target_row * ypir.db_cols..(target_row + 1) * ypir.db_cols].to_vec();
+    assert_eq!(decoded, expected);
 }
