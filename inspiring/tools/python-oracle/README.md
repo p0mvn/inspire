@@ -30,7 +30,7 @@ the per-stage breakdown.
 | 6     | Gadget decomposition                 | done   |
 | 7     | Key switching                        | done   |
 | 8     | `TRANSFORM` (LWE -> IRCtx)           | done   |
-| 9     | `aggregate`                          | todo   |
+| 9     | `aggregate`                          | done   |
 | 10    | `collapse_one`                       | todo   |
 | 11    | `collapse_half`                      | todo   |
 | 12    | `collapse` (full)                    | todo   |

@@ -17,9 +17,10 @@ Algorithm 1 stage 1 -- ``transform`` (this stage):
     message ``m'`` into the constant slot of a polynomial ``m_hat``, with
     every other slot exactly zero.
 
-Algorithm 1 stage 2 -- ``aggregate`` (added in oracle Stage 9):
+Algorithm 1 stage 2 -- ``aggregate`` (this stage):
     Combine ``d`` IRCtxs into one whose ``m_hat`` polynomial encodes one
-    plaintext per coefficient slot.
+    plaintext per coefficient slot. The ``X^k``-weighted sum routes each
+    input's slot-0 message+noise to a unique slot ``k`` of the aggregate.
 
 The IRCtx data type:
 
@@ -71,7 +72,7 @@ from dataclasses import dataclass
 from inspiring_oracle.automorph import G, h, tau
 from inspiring_oracle.lwe import LweCiphertext
 from inspiring_oracle.params import RlweParams
-from inspiring_oracle.ring import scalar_mul
+from inspiring_oracle.ring import add, mul_by_xk, scalar_mul
 
 
 @dataclass(frozen=True)
@@ -141,3 +142,59 @@ def transform(lwe: LweCiphertext, params: RlweParams) -> IRCtx:
         )
 
     return IRCtx(a_hat=a_hat, b_tilde=b_tilde)
+
+
+def aggregate(irctxs: list[IRCtx], params: RlweParams) -> IRCtx:
+    """Stage 2 of Algorithm 1 (SPEC.md section 5): aggregate ``d`` IRCtxs.
+
+    Input:  exactly ``d`` IRCtxs ``(a_hat_k, b_tilde_k)`` for ``k in [0, d)``,
+    each carrying a constant message polynomial ``m_hat_k = m_k * X^0``,
+    all encrypted under the **same** wider secret ``s_hat`` (i.e. produced
+    from LWE ciphertexts under the same ``s``).
+
+    Output: a single IRCtx ``(a_hat_agg, b_tilde_agg)`` under the same
+    ``s_hat``, with message polynomial::
+
+        m_hat_agg = sum_{k=0}^{d-1} m_hat_k * X^k = sum_{k=0}^{d-1} m_k * X^k
+
+    -- one LWE message per coefficient slot of the recovered polynomial.
+
+    Construction (from SPEC.md section 5)::
+
+        (a_hat_agg, b_tilde_agg) := sum_{k=0}^{d-1} (a_hat_k, b_tilde_k) * X^k
+                                   = (sum_k a_hat_k * X^k,
+                                      sum_k b_tilde_k * X^k)
+
+    For fresh ``transform`` outputs, ``b_tilde_k`` is the constant
+    polynomial ``[b_k, 0, ..., 0]``, so ``b_tilde_k * X^k`` is just ``b_k``
+    placed at slot ``k``. Hence ``b_tilde_agg = [b_0, b_1, ..., b_{d-1}]``
+    -- literally the ``d`` LWE ``b``-values, no multiplications. This is
+    the only piece of Stage 2 that touches per-query data; ``a_hat_agg``
+    depends only on the ``a_k``'s and is fully preprocessable in the CRS
+    model (SPEC.md section 8).
+
+    Adds **no** new noise. Each input's noise sits in slot 0 of its
+    constant ``m_hat_k``; the ``X^k`` shift moves it to slot ``k`` of
+    ``m_hat_agg`` -- noise is *routed*, not amplified or summed. (Slots
+    receive noise from disjoint inputs, so they don't interfere.)
+    """
+    d, q = params.d, params.q
+    if len(irctxs) != d:
+        raise ValueError(
+            f"aggregate expects exactly d={d} IRCtxs, got {len(irctxs)}"
+        )
+
+    a_hat_agg: list[list[int]] = [[0] * d for _ in range(d)]
+    b_tilde_agg: list[int] = [0] * d
+
+    for k, ictx in enumerate(irctxs):
+        # b_tilde_agg += b_tilde_k * X^k
+        # (For fresh transform inputs this just places b_k at slot k.)
+        b_tilde_agg = add(b_tilde_agg, mul_by_xk(ictx.b_tilde, k, q), q)
+        # a_hat_agg[j] += a_hat_k[j] * X^k  for each wider-secret index j
+        for j in range(d):
+            a_hat_agg[j] = add(
+                a_hat_agg[j], mul_by_xk(ictx.a_hat[j], k, q), q
+            )
+
+    return IRCtx(a_hat=a_hat_agg, b_tilde=b_tilde_agg)

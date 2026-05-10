@@ -77,3 +77,38 @@ def mul(a: list[int], b: list[int], q: int) -> list[int]:
     # high-degree coefficient at degree k + d wraps around to degree k,
     # but with a minus sign.
     return [(raw[k] - raw[k + d]) % q for k in range(d)]
+
+
+def mul_by_xk(a: list[int], k: int, q: int) -> list[int]:
+    """Multiply by the monomial ``X^k`` in R_q (negacyclic shift).
+
+    Equivalent to ``mul(a, [0]*k + [1] + [0]*(d-k-1), q)`` for ``k in [0, d)``,
+    but ``O(d)`` instead of ``O(d^2)`` -- relevant for ``aggregate``, which
+    invokes this ``d^2`` times per call.
+
+    Mechanics: ``X^d = -1`` and ``X^{2d} = 1``, so multiplying by ``X^k``
+    shifts coefficients up by ``k`` and applies a sign flip whenever the
+    target index wraps around ``d``::
+
+        a[i] -> position (i + k) mod d, with sign (-1)^{floor((i + k) / d)}
+
+    For ``k`` outside ``[0, d)`` we first reduce mod ``2d``: if the reduced
+    value is ``>= d`` we account for the implicit ``X^d = -1`` factor by
+    flipping the global sign and subtracting ``d``. After this, ``k`` is in
+    ``[0, d)`` and the inner loop has at most one wrap per coefficient.
+    """
+    d = len(a)
+    k = k % (2 * d)
+    sign = 1
+    if k >= d:
+        sign = -1
+        k -= d
+
+    out = [0] * d
+    for i in range(d):
+        j = i + k
+        if j < d:
+            out[j] = (sign * a[i]) % q
+        else:
+            out[j - d] = (-sign * a[i]) % q
+    return out

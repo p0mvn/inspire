@@ -23,7 +23,7 @@ import pytest
 import sympy as sp
 
 from inspiring_oracle.params import ORACLE_SMALL, ORACLE_TINY
-from inspiring_oracle.ring import add, mul, neg, scalar_mul, sub
+from inspiring_oracle.ring import add, mul, mul_by_xk, neg, scalar_mul, sub
 
 
 def rand_poly(rng: random.Random, d: int, q: int) -> list[int]:
@@ -305,3 +305,92 @@ class TestLengthValidation:
     def test_mul_rejects_length_mismatch(self):
         with pytest.raises(ValueError, match="length mismatch"):
             mul([1, 2], [1, 2, 3], 17)
+
+
+# --------------------------------------------------------------------------
+# Monomial multiplication: mul_by_xk
+# --------------------------------------------------------------------------
+
+
+class TestMulByXk:
+    """Negacyclic shift ``a -> a * X^k`` in R_q.
+
+    Same algebra as ``mul(a, x_pow(k, d), q)`` for ``k in [0, d)`` but
+    O(d) instead of O(d^2). Heavily used by ``intermediate.aggregate``.
+    """
+
+    def test_k_zero_is_identity(self, params, rng):
+        a = rand_poly(rng, params.d, params.q)
+        assert mul_by_xk(a, 0, params.q) == a
+
+    def test_k_equals_d_negates(self, params, rng):
+        """X^d = -1 in R_q, so a * X^d == -a."""
+        a = rand_poly(rng, params.d, params.q)
+        assert mul_by_xk(a, params.d, params.q) == neg(a, params.q)
+
+    def test_k_equals_2d_is_identity(self, params, rng):
+        """X^{2d} = (X^d)^2 = (-1)^2 = 1, so a * X^{2d} == a."""
+        a = rand_poly(rng, params.d, params.q)
+        assert mul_by_xk(a, 2 * params.d, params.q) == a
+
+    def test_zero_input_stays_zero(self, params):
+        zero = [0] * params.d
+        for k in range(2 * params.d + 1):
+            assert mul_by_xk(zero, k, params.q) == zero
+
+    def test_kat_d4(self):
+        """Hand-checked at d = 4: shifts and sign-flips of [1, 2, 3, 4]."""
+        d, q = 4, 17
+        a = [1, 2, 3, 4]
+        # X^0 -> identity
+        assert mul_by_xk(a, 0, q) == [1, 2, 3, 4]
+        # X^1: [1,2,3,4] * X -> [-4, 1, 2, 3] (4 wraps with sign flip)
+        assert mul_by_xk(a, 1, q) == [(-4) % q, 1, 2, 3]
+        # X^2: -> [-3, -4, 1, 2]
+        assert mul_by_xk(a, 2, q) == [(-3) % q, (-4) % q, 1, 2]
+        # X^3: -> [-2, -3, -4, 1]
+        assert mul_by_xk(a, 3, q) == [(-2) % q, (-3) % q, (-4) % q, 1]
+        # X^4: -a
+        assert mul_by_xk(a, 4, q) == [(-1) % q, (-2) % q, (-3) % q, (-4) % q]
+        # X^5 = X * X^4: [4, -1, -2, -3]
+        assert mul_by_xk(a, 5, q) == [4, (-1) % q, (-2) % q, (-3) % q]
+        # X^8 = (X^4)^2 = identity
+        assert mul_by_xk(a, 8, q) == a
+
+    def test_matches_general_mul(self, params, rng):
+        """For k in [0, d), mul_by_xk(a, k) == mul(a, X^k)."""
+        for k in range(params.d):
+            a = rand_poly(rng, params.d, params.q)
+            xk = x_pow(k, params.d)
+            assert mul_by_xk(a, k, params.q) == mul(a, xk, params.q)
+
+    def test_matches_general_mul_for_wrapped_k(self, params, rng):
+        """For k in [d, 2d), mul_by_xk(a, k) == -mul(a, X^{k-d})."""
+        for k_extra in range(params.d):
+            k = params.d + k_extra
+            a = rand_poly(rng, params.d, params.q)
+            xk_reduced = x_pow(k_extra, params.d)
+            expected = neg(mul(a, xk_reduced, params.q), params.q)
+            assert mul_by_xk(a, k, params.q) == expected
+
+    def test_composition_xk_xj_equals_xkj(self, params, rng):
+        """mul_by_xk(mul_by_xk(a, k), j) == mul_by_xk(a, k + j)."""
+        for k, j in [(0, 0), (1, 3), (4, 5), (7, 9), (params.d - 1, params.d + 1)]:
+            a = rand_poly(rng, params.d, params.q)
+            lhs = mul_by_xk(mul_by_xk(a, k, params.q), j, params.q)
+            rhs = mul_by_xk(a, k + j, params.q)
+            assert lhs == rhs, f"k={k}, j={j}"
+
+    def test_output_in_range(self, params, rng):
+        for k in range(0, 2 * params.d):
+            a = rand_poly(rng, params.d, params.q)
+            result = mul_by_xk(a, k, params.q)
+            assert all(0 <= c < params.q for c in result)
+
+    def test_period_2d(self, params, rng):
+        """X^{k + 2d} == X^k for all k (because X^{2d} = 1)."""
+        a = rand_poly(rng, params.d, params.q)
+        for k in [0, 1, 3, params.d - 1, params.d, params.d + 5]:
+            assert mul_by_xk(a, k, params.q) == mul_by_xk(
+                a, k + 2 * params.d, params.q
+            )
