@@ -1,5 +1,3 @@
-
-
 # InsPIRing
 
 ## Key Insights

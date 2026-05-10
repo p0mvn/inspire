@@ -75,6 +75,9 @@ pub fn ks_setup<'a>(
     s_to_ntt: &PolyMatrixNTT<'a>,
     rng: &mut ChaCha20Rng,
 ) -> KeySwitchingMatrix<'a> {
+    // CT-sensitive: setup consumes secret-key polynomials (`s_from_ntt` and
+    // `s_to_ntt`). It is offline key-generation code, not the online packing
+    // path, and it does not branch on secret coefficients directly.
     assert_eq!(s_from_ntt.rows, 1);
     assert_eq!(s_from_ntt.cols, 1);
     assert_eq!(s_to_ntt.rows, 1);

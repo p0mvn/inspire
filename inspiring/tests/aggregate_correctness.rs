@@ -117,7 +117,7 @@ fn decrypt_under_s_hat(
 fn aggregate_decrypts_to_one_encoded_message_per_slot() {
     let params = params();
     let s_tilde = vec![3, 1, 4, 1, 5, 9, 2, 6];
-    let messages = vec![0, 1, 2, 3, 3, 2, 1, 0];
+    let messages = [0, 1, 2, 3, 3, 2, 1, 0];
     let irctxs: Vec<_> = messages
         .iter()
         .enumerate()

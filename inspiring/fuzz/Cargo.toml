@@ -1,0 +1,20 @@
+[package]
+name = "inspiring-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+inspiring = { path = ".." }
+libfuzzer-sys = "0.4"
+spiral-rs = { git = "https://github.com/menonsamir/spiral-rs.git", rev = "6929441c6551769b7d099d3af3df347cde3bae7b" }
+
+[[bin]]
+name = "pack_no_panic"
+path = "fuzz_targets/pack_no_panic.rs"
+test = false
+doc = false
+bench = false

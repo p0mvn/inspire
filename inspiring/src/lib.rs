@@ -67,14 +67,9 @@
 //! constraints.
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
-// Phase 11 hardening will flip these `warn`s to `deny` and re-enable
-// `clippy::pedantic`. During Phase 4 (skeleton) and Phase 5–8
-// (implementation) we keep them as `warn` so half-built modules don't break
-// local rustdoc runs, and we deliberately do NOT opt into pedantic — it
-// flags every stub signature here as `#[must_use]`-missing, which is the
-// wrong call for skeleton fns that always `unimplemented!()`.
-#![warn(missing_docs)]
-#![warn(rust_2018_idioms)]
+#![deny(missing_docs)]
+#![deny(rust_2018_idioms)]
+#![forbid(unsafe_code)]
 
 // =============================================================================
 //  Compile-time AVX-512 gate (CORRECTNESS, NOT PERFORMANCE)
@@ -131,9 +126,10 @@
 // `.cargo/config.toml`) and `target-cpu=native` on any AVX-512 host both
 // satisfy this gate.
 //
-// `docsrs` is exempted because docs.rs's builders don't expose AVX-512 and
-// rustdoc never executes the code anyway.
-#[cfg(not(any(target_feature = "avx512f", docsrs)))]
+// Rustdoc builds (`doc` locally and `docsrs` on docs.rs) are exempted because
+// documentation builders do not necessarily expose AVX-512 and rustdoc never
+// executes the code anyway.
+#[cfg(not(any(target_feature = "avx512f", docsrs, doc)))]
 compile_error!(
     "inspiring requires an AVX-512 build (e.g. RUSTFLAGS='-C target-cpu=skylake-avx512' or \
      '-C target-cpu=native' on an AVX-512 host). This is a correctness requirement, not a \

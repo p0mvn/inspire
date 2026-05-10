@@ -34,7 +34,7 @@ todos:
     status: completed
   - id: hardening
     content: "Production hardening: rustdoc + missing_docs lint, clippy/fmt, cargo-fuzz target, constant-time review, GitHub Actions CI, SECURITY.md, paper attribution"
-    status: pending
+    status: completed
 isProject: false
 ---
 

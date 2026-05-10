@@ -22,7 +22,7 @@ ciphertext of degree `d`, using exactly **two** key-switching matrices
 
 ## Status
 
-This repo is **mid-build**. Phase tracking:
+This crate now implements the planned `InspiRING.Pack` surface. Phase tracking:
 
 | Phase | Concept                                              | Status |
 | ----- | ---------------------------------------------------- | ------ |
@@ -30,13 +30,13 @@ This repo is **mid-build**. Phase tracking:
 | 2     | Python reference oracle (`tools/python-oracle/`)     | done   |
 | 3     | spiral-rs primitive audit (`docs/spiral-rs-mapping.md`) | done   |
 | 4     | Crate skeleton (`Cargo.toml`, `src/`, `tests/`, …)   | done   |
-| 5     | Stage 1 (`intermediate::transform`)                  | pending |
-| 6     | Stage 2 (`intermediate::aggregate`)                  | pending |
-| 7     | Stage 3 (`collapse::*`, `key_switching::*`)          | pending |
-| 8     | `pack` + offline / online split                      | pending |
-| 9     | Test suite (Lemma 1, oracle match, Theorem 2, …)     | pending |
-| 10    | Benchmarks (paper Table 5)                           | pending |
-| 11    | Production hardening (rustdoc, fuzz, CI, security)   | pending |
+| 5     | Stage 1 (`intermediate::transform`)                  | done   |
+| 6     | Stage 2 (`intermediate::aggregate`)                  | done   |
+| 7     | Stage 3 (`collapse::*`, `key_switching::*`)          | done   |
+| 8     | `pack` + offline / online split                      | done   |
+| 9     | Test suite (Lemma 1, oracle match, Theorem 2, …)     | done   |
+| 10    | Benchmarks (paper Table 5)                           | done   |
+| 11    | Production hardening (rustdoc, fuzz, CI, security)   | done   |
 
 See [`SPEC.md`](SPEC.md) for the mathematical contract and
 [`docs/spiral-rs-mapping.md`](docs/spiral-rs-mapping.md) for the
@@ -115,8 +115,27 @@ On a Linux x86_64 + AVX-512 host:
 ```bash
 cd inspiring
 cargo build --release           # nightly is auto-selected by rust-toolchain.toml
-cargo test                       # Phase 4 smoke test only
-cargo doc --open
+cargo test
+cargo clippy --all-targets --all-features -- -D warnings
+cargo doc --no-deps --open
+```
+
+### Benchmarks
+
+```bash
+cd inspiring
+cargo bench --bench pack
+```
+
+See [`bench/REPORT.md`](bench/REPORT.md) for the Table 5 parameter sets and
+reporting format.
+
+### Fuzzing
+
+```bash
+cd inspiring
+cargo install cargo-fuzz
+cargo fuzz run pack_no_panic
 ```
 
 ### Apple Silicon devs
@@ -142,8 +161,17 @@ running tests, use CI or a Linux x86_64 + AVX-512 host.
 make oracle-test                 # see Makefile
 ```
 
-## License
+## Attribution and License
 
-MIT OR Apache-2.0, at your option. See `SECURITY.md` (Phase 11) for the
-parameter-set security checklist (lattice-estimator, circular-security,
-noise budget vs. Theorem 2).
+This crate implements Algorithm 1 from:
+
+> R. A. Mahdavi, S. Patel, J. Y. Seo, K. Yeo. *InsPIRe:
+> Communication-Efficient PIR with Server-side Preprocessing.*
+> ePrint 2025/1352. <https://eprint.iacr.org/2025/1352>
+
+It is cross-checked against the public Google reference implementation:
+<https://github.com/google/private-membership/tree/main/research/InsPIRe>.
+
+MIT OR Apache-2.0, at your option. See [`SECURITY.md`](SECURITY.md) for the
+parameter-set security checklist, circular-security assumptions, and
+Theorem 2 noise-budget notes.
