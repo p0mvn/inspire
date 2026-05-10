@@ -1,0 +1,75 @@
+//! Actix HTTP surface for PIR queries.
+
+use std::sync::Arc;
+
+use actix_cors::Cors;
+use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
+use anyhow::Result;
+use serde::Serialize;
+
+use crate::backend::PirBackend;
+use crate::snapshot::SnapshotMetadata;
+
+#[derive(Clone)]
+pub struct AppState {
+    pub backend: Arc<dyn PirBackend>,
+    pub snapshot: SnapshotMetadata,
+}
+
+#[derive(Debug, Serialize)]
+struct HealthResponse {
+    ok: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct MetaResponse {
+    snapshot: SnapshotMetadata,
+    backend: crate::backend::BackendMetadata,
+}
+
+#[get("/health")]
+async fn health() -> impl Responder {
+    web::Json(HealthResponse { ok: true })
+}
+
+#[get("/meta")]
+async fn meta(data: web::Data<AppState>) -> impl Responder {
+    web::Json(MetaResponse {
+        snapshot: data.snapshot.clone(),
+        backend: data.backend.meta(),
+    })
+}
+
+#[post("/query")]
+async fn query(body: web::Bytes, data: web::Data<AppState>) -> actix_web::Result<HttpResponse> {
+    let response = data
+        .backend
+        .answer_query(&body)
+        .map_err(actix_web::error::ErrorBadRequest)?;
+    Ok(HttpResponse::Ok()
+        .content_type("application/octet-stream")
+        .body(response))
+}
+
+pub async fn serve(
+    bind_host: String,
+    port: u16,
+    backend: Arc<dyn PirBackend>,
+    snapshot: SnapshotMetadata,
+) -> Result<()> {
+    let state = web::Data::new(AppState { backend, snapshot });
+    HttpServer::new(move || {
+        App::new()
+            .wrap(Cors::permissive())
+            .app_data(state.clone())
+            .app_data(web::PayloadConfig::new(1usize << 32))
+            .service(health)
+            .service(meta)
+            .service(query)
+    })
+    .workers(1)
+    .bind((bind_host, port))?
+    .run()
+    .await?;
+    Ok(())
+}
