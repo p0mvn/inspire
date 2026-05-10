@@ -1,0 +1,5 @@
+# Workspace-wide toolchain: rust-analyzer, `cargo`, and CI use this single file.
+[toolchain]
+channel = "1.89.0"
+components = ["rustfmt", "clippy", "rust-analyzer"]
+targets = ["x86_64-unknown-linux-gnu"]

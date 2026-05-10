@@ -7,18 +7,14 @@
 //!
 //! Phase 8 status: online entry point is implemented.
 //!
-//! Known gap: SPEC.md §8 describes a stronger offline/online split than this
-//! module currently implements. `PackPreprocessed` caches `â_agg` and the
-//! automorphic key-switching images, but not the collapse `a`-trace or the
-//! gadget-decomposed digits from that trace. As a result, each online `pack`
-//! still calls `collapse`, whose `ks_switch` path repeats the `c1` inverse NTT,
-//! gadget inversion, digit NTT, and top-row multiplication for the deterministic
-//! `a` side. That work depends only on preprocessing material and is the next
-//! optimization target.
+//! `PackPreprocessed` caches the CRS-derived `â_agg`, automorphic
+//! key-switching images, and the NTT-form gadget digits for the deterministic
+//! collapse `a`-trace. Online packing assembles only `b̃_agg` from the query
+//! scalars and reuses those cached digits for the logical KS cascade.
 
 use spiral_rs::poly::{PolyMatrix, PolyMatrixNTT, PolyMatrixRaw};
 
-use crate::collapse::collapse;
+use crate::collapse::collapse_with_digits;
 use crate::error::InspiringError;
 use crate::intermediate::IRCtx;
 use crate::lwe::LweBatch;
@@ -60,9 +56,7 @@ pub fn pack<'a>(
         b_tilde.get_poly_mut(0, 0)[idx] = ct.b % pre.params.q;
     }
 
-    // TODO(online-cache): consume a precomputed collapse a-trace and digit
-    // cache so online packing only updates the b side of the cascade.
-    Ok(collapse(
+    Ok(collapse_with_digits(
         pre.params,
         IRCtx {
             a_hat: pre.a_agg.clone(),
@@ -71,6 +65,7 @@ pub fn pack<'a>(
         &pre.kg_images_left,
         &pre.kg_images_right,
         &pre.kh,
+        &pre.collapse_digits_ntt,
     ))
 }
 

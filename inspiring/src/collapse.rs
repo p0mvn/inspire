@@ -22,10 +22,12 @@
 //!
 //! Stage 3 is implemented.
 
-use spiral_rs::poly::{add_into, stack_ntt, to_ntt_alloc, PolyMatrixNTT};
+use spiral_rs::poly::{add_into, stack_ntt, to_ntt_alloc, PolyMatrix, PolyMatrixNTT};
 
 use crate::intermediate::IRCtx;
-use crate::key_switching::{ks_switch, KeySwitchingMatrix};
+use crate::key_switching::{
+    ks_digits_ntt_from_c1, ks_switch, ks_switch_with_digits_ntt, KeySwitchingMatrix,
+};
 use crate::pack::RlweCiphertext;
 use crate::params::RlweParams;
 
@@ -51,6 +53,23 @@ pub fn collapse_one<'a>(state: &mut CollapseState<'a>, k_image: &KeySwitchingMat
     state.b = delta_b;
 }
 
+fn collapse_one_with_digits<'a>(
+    state: &mut CollapseState<'a>,
+    k_image: &KeySwitchingMatrix<'a>,
+    digits_ntt: &PolyMatrixNTT<'a>,
+) {
+    let k = state.a.len();
+    assert!(
+        k >= 2,
+        "collapse::collapse_one_with_digits requires at least two a components"
+    );
+
+    let (delta_a, delta_b) = ks_switch_with_digits_ntt(k_image, digits_ntt, &state.b);
+    add_into(&mut state.a[k - 2], &delta_a);
+    state.a.pop();
+    state.b = delta_b;
+}
+
 /// `CollapseHalf` — runs `d/2 - 1` `collapse_one` calls over one half
 /// (either the `τ_g^j` half or the `τ_h ∘ τ_g^j` half) of `a_agg`.
 ///
@@ -66,6 +85,46 @@ pub fn collapse_half<'a>(state: &mut CollapseState<'a>, kg_images: &[KeySwitchin
     while state.a.len() > 1 {
         let image_idx = state.a.len() - 2;
         collapse_one(state, &kg_images[image_idx]);
+    }
+}
+
+fn collapse_half_with_digits<'a>(
+    state: &mut CollapseState<'a>,
+    kg_images: &[KeySwitchingMatrix<'a>],
+    digits_ntt: &[PolyMatrixNTT<'a>],
+    digit_idx: &mut usize,
+) {
+    assert_eq!(
+        kg_images.len(),
+        state.a.len().saturating_sub(1),
+        "collapse::collapse_half_with_digits expects one K_g image per collapse step"
+    );
+
+    while state.a.len() > 1 {
+        let image_idx = state.a.len() - 2;
+        collapse_one_with_digits(state, &kg_images[image_idx], &digits_ntt[*digit_idx]);
+        *digit_idx += 1;
+    }
+}
+
+fn collect_half_digits<'a>(
+    params: &'a RlweParams,
+    state: &mut CollapseState<'a>,
+    kg_images: &[KeySwitchingMatrix<'a>],
+    digits_ntt: &mut Vec<PolyMatrixNTT<'a>>,
+) {
+    assert_eq!(
+        kg_images.len(),
+        state.a.len().saturating_sub(1),
+        "collapse::collect_half_digits expects one K_g image per collapse step"
+    );
+
+    while state.a.len() > 1 {
+        let image_idx = state.a.len() - 2;
+        let c1 = &state.a[state.a.len() - 1];
+        let digits = ks_digits_ntt_from_c1(params, c1);
+        collapse_one_with_digits(state, &kg_images[image_idx], &digits);
+        digits_ntt.push(digits);
     }
 }
 
@@ -128,6 +187,129 @@ pub fn collapse<'a>(
     RlweCiphertext {
         inner: stack_ntt(&final_state.a[0], &final_state.b),
     }
+}
+
+/// Full Stage 3 using a precomputed digit block for every logical KS switch.
+///
+/// Digits are consumed in cascade execution order: left half, right half,
+/// then the final `K_h` switch.
+pub fn collapse_with_digits<'a>(
+    params: &'a RlweParams,
+    agg: IRCtx<'a>,
+    kg_images_left: &[KeySwitchingMatrix<'a>],
+    kg_images_right: &[KeySwitchingMatrix<'a>],
+    kh: &KeySwitchingMatrix<'a>,
+    digits_ntt: &[PolyMatrixNTT<'a>],
+) -> RlweCiphertext<'a> {
+    assert_eq!(
+        digits_ntt.len(),
+        params.d - 1,
+        "collapse::collapse_with_digits expects d - 1 digit blocks"
+    );
+    assert_eq!(
+        agg.a_hat.len(),
+        params.d,
+        "collapse::collapse_with_digits expects d a_hat slots"
+    );
+    assert_eq!(
+        kg_images_left.len(),
+        params.d / 2 - 1,
+        "collapse::collapse_with_digits expects d/2 - 1 left K_g images"
+    );
+    assert_eq!(
+        kg_images_right.len(),
+        params.d / 2 - 1,
+        "collapse::collapse_with_digits expects d/2 - 1 right K_g images"
+    );
+
+    let mut slots = agg.a_hat;
+    let right = slots.split_off(params.d / 2);
+    let left = slots;
+    let b = to_ntt_alloc(&agg.b_tilde);
+    let mut digit_idx = 0;
+
+    let mut left_state = CollapseState { a: left, b };
+    collapse_half_with_digits(&mut left_state, kg_images_left, digits_ntt, &mut digit_idx);
+    let left_a = left_state
+        .a
+        .pop()
+        .expect("collapse_half_with_digits leaves one left component");
+
+    let mut right_state = CollapseState {
+        a: right,
+        b: left_state.b,
+    };
+    collapse_half_with_digits(
+        &mut right_state,
+        kg_images_right,
+        digits_ntt,
+        &mut digit_idx,
+    );
+    let right_a = right_state
+        .a
+        .pop()
+        .expect("collapse_half_with_digits leaves one right component");
+
+    let mut final_state = CollapseState {
+        a: vec![left_a, right_a],
+        b: right_state.b,
+    };
+    collapse_one_with_digits(&mut final_state, kh, &digits_ntt[digit_idx]);
+    digit_idx += 1;
+    assert_eq!(digit_idx, digits_ntt.len());
+
+    RlweCiphertext {
+        inner: stack_ntt(&final_state.a[0], &final_state.b),
+    }
+}
+
+/// Collect the preprocessable digit blocks for the fixed `a` collapse trace.
+pub(crate) fn collect_collapse_digits<'a>(
+    params: &'a RlweParams,
+    a_hat: Vec<PolyMatrixNTT<'a>>,
+    kg_images_left: &[KeySwitchingMatrix<'a>],
+    kg_images_right: &[KeySwitchingMatrix<'a>],
+    kh: &KeySwitchingMatrix<'a>,
+) -> Vec<PolyMatrixNTT<'a>> {
+    assert_eq!(
+        a_hat.len(),
+        params.d,
+        "collapse::collect_collapse_digits expects d a_hat slots"
+    );
+
+    let mut slots = a_hat;
+    let right = slots.split_off(params.d / 2);
+    let left = slots;
+    let b = PolyMatrixNTT::zero(&params.spiral, 1, 1);
+    let mut digits_ntt = Vec::with_capacity(params.d - 1);
+
+    let mut left_state = CollapseState { a: left, b };
+    collect_half_digits(params, &mut left_state, kg_images_left, &mut digits_ntt);
+    let left_a = left_state
+        .a
+        .pop()
+        .expect("collect_half_digits leaves one left component");
+
+    let mut right_state = CollapseState {
+        a: right,
+        b: left_state.b,
+    };
+    collect_half_digits(params, &mut right_state, kg_images_right, &mut digits_ntt);
+    let right_a = right_state
+        .a
+        .pop()
+        .expect("collect_half_digits leaves one right component");
+
+    let mut final_state = CollapseState {
+        a: vec![left_a, right_a],
+        b: right_state.b,
+    };
+    let digits = ks_digits_ntt_from_c1(params, &final_state.a[1]);
+    collapse_one_with_digits(&mut final_state, kh, &digits);
+    digits_ntt.push(digits);
+
+    assert_eq!(digits_ntt.len(), params.d - 1);
+    digits_ntt
 }
 
 /// Running state of the collapse cascade. At each step it carries

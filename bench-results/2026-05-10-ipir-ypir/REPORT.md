@@ -160,23 +160,45 @@ Artifact: `raw/ipir-32768x131072-after-preprocess-fix.log`
 - `offline_crs_extract_and_preprocess/5`: 100.43 s median
 - `online_pack_and_serialize/5`: 4.4272 s median
 
+### IPIR+SP After Online Collapse Digit Cache
+
+Command:
+
+```bash
+IPIR_SP_BENCH_FULL=1 cargo bench -p ipir-sp --bench end_to_end
+```
+
+Artifact: `raw/ipir-32768x131072-after-online-cache.log`
+
+- Profile: `ipir_sp_32768_131072`
+- Rows: 32768
+- Item size: 131072 bits
+- RLWE degree: 2048
+- Outputs: 5
+- DB columns: 10240
+- Serialized KS pair: 192 KiB
+- Compressed KS pair estimate: 168 KiB
+- Response: 60 KiB
+- `||e_pack||_inf_bits`: 34
+- `offline_crs_extract_and_preprocess/5`: 103.83 s median
+- `online_pack_and_serialize/5`: 997.07 ms median
+
 ## Normalized Interpretation
 
 - YPIR+SP headline full-system timing is 294 ms average online server time, including 199 ms ring packing.
 - IPIR+SP headline now completes on this 31 GiB/no-swap host after removing the dead `a_hat` cache and replacing the preprocessing aggregation path.
-- IPIR+SP headline online pack/serialize is 4.4272 s for five RLWE outputs. This is not competitive with the YPIR ring-packing number yet because online `pack` still recomputes the deterministic collapse `a`-trace.
-- IPIR+SP headline offline CRS extraction/preprocessing is 100.43 s for five RLWE outputs. The fix makes the benchmark measurable and memory-safe, but preprocessing remains heavy.
+- IPIR+SP headline online pack/serialize is now 997.07 ms for five RLWE outputs after caching collapse gadget digits, down from 4.4272 s before the online cache.
+- IPIR+SP headline offline CRS extraction/preprocessing is 103.83 s for five RLWE outputs. The online cache shifts deterministic digit derivation into preprocessing, so offline setup remains heavy.
 
 ## Follow-up Needed
 
-- Implement the online cache described below so `pack` does not redo the collapse `a`-side key-switch work on every online response.
 - Consider further preprocessing optimization if 100 s offline setup is too high for the intended benchmark target.
 - If a full-system IPIR comparison is required, add a dedicated benchmark around `IPIRServer::perform_online_computation_simplepir` that reports scalar SimplePIR matrix time separately from InspiRING pack/serialize time.
 
-## Known Online Gap
+## Online Gap Status
 
-The current online `inspiring::pack` path still recomputes the deterministic
-collapse `a`-side trace on every call. Per `inspiring/SPEC.md` §8, a future
-`PackPreprocessed` should cache `a_trace_left`, `a_trace_right`, `a_final`, and
-the gadget-decomposed digits derived from that trace. That would let online
-packing update only the `b` side of the key-switching cascade.
+Resolved in code and benchmarked above: `PackPreprocessed` now caches the
+NTT-form gadget-decomposed digits derived from the deterministic collapse
+`a`-side trace. Online `inspiring::pack` consumes those cached digits, skipping
+the per-call inverse NTT, gadget inversion, and digit NTT work in the
+key-switching cascade.

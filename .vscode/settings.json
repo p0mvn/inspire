@@ -1,7 +1,13 @@
 {
-  "rust-analyzer.linkedProjects": ["${workspaceFolder}/Cargo.toml"],
+  // Repo must be opened at this workspace root (not only `inspiring/`), otherwise
+  // `workspace = true` deps in `inspiring/Cargo.toml` cannot resolve.
   "rust-analyzer.check.workspace": true,
   "rust-analyzer.cargo.allTargets": true,
   "rust-analyzer.procMacro.enable": true,
-  "rust-analyzer.cargo.buildScripts.enable": true
+  "rust-analyzer.cargo.buildScripts.enable": true,
+  "rust-analyzer.checkOnSave": true,
+  "rust-analyzer.rustc.source": "discover",
+  "files.watcherExclude": {
+    "**/target/**": true
+  }
 }

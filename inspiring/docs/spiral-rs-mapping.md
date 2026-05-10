@@ -25,7 +25,7 @@ spiral-rs at this revision relaxes the old AVX-512-only build constraints. The
 
 | Constraint | Source | Mitigation |
 |---|---|---|
-| Stable Rust is sufficient; the old `#![feature(stdarch_x86_avx512)]` gate is gone. | `spiral-rs/src/lib.rs:1` | `inspiring/rust-toolchain.toml` pins stable `1.89.0`. |
+| Stable Rust is sufficient; the old `#![feature(stdarch_x86_avx512)]` gate is gone. | `spiral-rs/src/lib.rs:1` | Workspace [`rust-toolchain.toml`](../../rust-toolchain.toml) pins stable `1.89.0`. |
 | AVX-512 is no longer a correctness requirement for the NTT path. | `spiral-rs/src/ntt/` | `inspiring/.cargo/config.toml` no longer forces `target-cpu=skylake-avx512`; CI builds without an AVX-512 preflight. |
 | The scalar `multiply` fallback is correct for `crt_count == 1`. `arith::multiply_add_modular` now adds the accumulator `x` after `a*b mod q`. | `spiral-rs/src/arith.rs:28-33`, plus upstream test `multiply_add_modular_single_crt_includes_accumulator` | `inspiring` removed its `compile_error!` AVX-512 gate. The local regression test `spiral_matrix_multiply_accumulates_along_inner_dim` remains as a guard against future drift. |
 | Memory alignment of polynomial buffers is 64 bytes (`AlignedMemory64`). | `spiral-rs/src/aligned_memory.rs:8` | We always allocate `PolyMatrix*` via spiral-rs constructors (`PolyMatrixRaw::zero`, etc.), never via `Vec<u64>`. |

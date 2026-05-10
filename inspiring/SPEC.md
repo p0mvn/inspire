@@ -518,7 +518,7 @@ A quantity is **online-only** if it depends on the per-query LWE pseudorandom va
 |---|---|---|
 | Stage 1 (`TRANSFORM`) | All `â_k` for `k = 0…d−1`. | The trivial reinterpretation `b̃_k = b_k · X^0` (no work). |
 | Stage 2 (aggregation) | `â_agg = Σ â_k · X^k`. | `b̃_agg = Σ b_k · X^k` (`O(d)` integer copies — coefficient assembly only). |
-| Stage 3 (collapse) | The full `a`-trace `a^{(d/2-1)}, …, a^{(0)}` for both halves, plus the final `[a_1, a_2]` and `a_fin`. (Paper §3.2's "random-component invariant".) Also: all automorphic images `τ_g^{k-1}(K_g)`, `τ_h(τ_g^{k-1}(K_g))`. | The `b`-trace updates, which are `g_z^{-1}(a^{(k)}[k-1]) · y` (where `y` is the appropriate column of the precomputed KS matrix image). |
+| Stage 3 (collapse) | The full `a`-trace `a^{(d/2-1)}, …, a^{(0)}` for both halves, plus the final `[a_1, a_2]` and `a_fin`. (Paper §3.2's "random-component invariant".) The implementation materialises the NTT-form gadget digits derived from that trace, one block per `CollapseOne` step. Also: all automorphic images `τ_g^{k-1}(K_g)`, `τ_h(τ_g^{k-1}(K_g))`. | The `b`-trace updates, which are `g_z^{-1}(a^{(k)}[k-1]) · y` (where `y` is the appropriate column of the precomputed KS matrix image). |
 
 ### Resulting API shape (`src/preprocess.rs`, `src/pack.rs`)
 
@@ -526,17 +526,17 @@ A quantity is **online-only** if it depends on the per-query LWE pseudorandom va
 pub struct PackPreprocessed {
     /// Cached â_agg (NTT form) — Stage 1+2 outputs.
     a_agg: Vec<PolyMatrixNTT>,
-    /// Cached running a-trace through the collapse, both halves + final.
-    /// One entry per CollapseOne step.
-    a_trace_left: Vec<PolyMatrixNTT>,
-    a_trace_right: Vec<PolyMatrixNTT>,
-    a_final: PolyMatrixNTT,
-    /// Cached automorphic images of K_g and K_h (only the parts needed for the b-update).
-    kg_images_left: Vec<PolyMatrixNTT>,   // y-columns
-    kg_images_right: Vec<PolyMatrixNTT>,
-    kh_image: PolyMatrixNTT,
+    /// The two base key-switching matrices accepted by the preprocessing API.
+    kg: KeySwitchingMatrix,
+    kh: KeySwitchingMatrix,
+    /// Cached automorphic images of K_g for both collapse halves.
+    kg_images_left: Vec<KeySwitchingMatrix>,
+    kg_images_right: Vec<KeySwitchingMatrix>,
+    /// Cached NTT-form gadget digits derived from the deterministic a-trace.
+    /// Ordered left-half switches, right-half switches, final K_h switch.
+    collapse_digits_ntt: Vec<PolyMatrixNTT>,
     /// Bookkeeping (params, gadget, etc.).
-    params: Arc<RlweParams>,
+    params: RlweParams,
 }
 
 impl PackPreprocessed {

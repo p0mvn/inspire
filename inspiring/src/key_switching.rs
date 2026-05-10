@@ -141,8 +141,6 @@ pub fn ks_switch<'a>(
     c1: &PolyMatrixNTT<'a>,
     c2: &PolyMatrixNTT<'a>,
 ) -> (PolyMatrixNTT<'a>, PolyMatrixNTT<'a>) {
-    ks_call_count::inc();
-
     let params = k.params;
     assert_eq!(k.mat.rows, 2, "KS matrix must have 2 rows ([w; y])");
     assert_eq!(
@@ -161,9 +159,46 @@ pub fn ks_switch<'a>(
     // `RlweParams::new`), which is why `KeySwitchingMatrix` carries its own
     // `params` reference rather than letting us infer the width from
     // `K.mat.cols`.
+    let digits_ntt = ks_digits_ntt_from_c1(params, c1);
+    ks_switch_with_digits_ntt(k, &digits_ntt, c2)
+}
+
+/// Precompute the NTT-form gadget digits used by [`ks_switch`] for `c1`.
+///
+/// This is the preprocessable part of a switch when the `c1` cascade is
+/// fixed by the CRS. Online packing can reuse these digits and only update
+/// the `c2`/`b` side of the switch.
+pub(crate) fn ks_digits_ntt_from_c1<'a>(
+    params: &'a RlweParams,
+    c1: &PolyMatrixNTT<'a>,
+) -> PolyMatrixNTT<'a> {
+    assert_eq!(c1.rows, 1);
+    assert_eq!(c1.cols, 1);
+
     let digits_raw = signed_gadget_invert_alloc(params, &from_ntt_alloc(c1));
-    let digits_ntt = to_ntt_alloc(&digits_raw);
-    let mut switched = PolyMatrixNTT::zero(c1.params, 2, 1);
+    to_ntt_alloc(&digits_raw)
+}
+
+/// Apply a key switch using precomputed NTT-form gadget digits for `c1`.
+pub(crate) fn ks_switch_with_digits_ntt<'a>(
+    k: &KeySwitchingMatrix<'a>,
+    digits_ntt: &PolyMatrixNTT<'a>,
+    c2: &PolyMatrixNTT<'a>,
+) -> (PolyMatrixNTT<'a>, PolyMatrixNTT<'a>) {
+    ks_call_count::inc();
+
+    let params = k.params;
+    assert_eq!(k.mat.rows, 2, "KS matrix must have 2 rows ([w; y])");
+    assert_eq!(
+        k.mat.cols, params.gadget.ell,
+        "KS matrix width must match the gadget length ℓ",
+    );
+    assert_eq!(digits_ntt.rows, params.gadget.ell);
+    assert_eq!(digits_ntt.cols, 1);
+    assert_eq!(c2.rows, 1);
+    assert_eq!(c2.cols, 1);
+
+    let mut switched = PolyMatrixNTT::zero(&params.spiral, 2, 1);
     multiply(&mut switched, &k.mat, &digits_ntt);
 
     let delta_a = switched.submatrix(0, 0, 1, 1);
@@ -438,6 +473,43 @@ mod tests {
 
         assert_eq!(digits.get_poly(0, 0)[2], params.q - 4);
         assert_eq!(digits.get_poly(0, 0)[3], params.q - 1);
+    }
+
+    #[test]
+    fn ks_switch_with_precomputed_digits_matches_full_switch() {
+        let params = params();
+        let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(0xD161_7A11);
+        let k = ks_setup(
+            &params,
+            &ntt_from_coeffs(&params, &[1, 2, 3, 4, 5, 6, 7, 8]),
+            &ntt_from_coeffs(&params, &[8, 7, 6, 5, 4, 3, 2, 1]),
+            &mut rng,
+        );
+        let c1 = ntt_from_coeffs(&params, &[3, 1, 4, 1, 5, 9, 2, 6]);
+        let c2_values = [
+            [0, 0, 0, 0, 0, 0, 0, 0],
+            [9, 2, 6, 5, 3, 5, 8, 9],
+            [
+                params.q - 1,
+                1,
+                params.q - 2,
+                2,
+                params.q - 3,
+                3,
+                params.q - 4,
+                4,
+            ],
+        ];
+        let digits = ks_digits_ntt_from_c1(&params, &c1);
+
+        for c2_coeffs in c2_values {
+            let c2 = ntt_from_coeffs(&params, &c2_coeffs);
+            let (expected_a, expected_b) = ks_switch(&k, &c1, &c2);
+            let (actual_a, actual_b) = ks_switch_with_digits_ntt(&k, &digits, &c2);
+
+            assert_eq!(actual_a.as_slice(), expected_a.as_slice());
+            assert_eq!(actual_b.as_slice(), expected_b.as_slice());
+        }
     }
 
     // ---- KS round-trip --------------------------------------------------

@@ -6,7 +6,7 @@ on:
       - ".github/workflows/inspiring-crate.yml"
       - "inspiring/Cargo.toml"
       - "inspiring/Cargo.lock"
-      - "inspiring/rust-toolchain.toml"
+      - "rust-toolchain.toml"
       - "inspiring/.cargo/**"
       - "inspiring/src/**"
       - "inspiring/tests/**"
@@ -20,7 +20,7 @@ on:
       - ".github/workflows/inspiring-crate.yml"
       - "inspiring/Cargo.toml"
       - "inspiring/Cargo.lock"
-      - "inspiring/rust-toolchain.toml"
+      - "rust-toolchain.toml"
       - "inspiring/.cargo/**"
       - "inspiring/src/**"
       - "inspiring/tests/**"
@@ -62,7 +62,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             inspiring/target/
-          key: ${{ runner.os }}-cargo-inspiring-${{ hashFiles('inspiring/Cargo.lock', 'inspiring/Cargo.toml', 'inspiring/rust-toolchain.toml') }}
+          key: ${{ runner.os }}-cargo-inspiring-${{ hashFiles('inspiring/Cargo.lock', 'inspiring/Cargo.toml', 'rust-toolchain.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-inspiring-
 
@@ -121,7 +121,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             inspiring/target/
-          key: ${{ runner.os }}-cargo-inspiring-tests-${{ hashFiles('inspiring/Cargo.lock', 'inspiring/Cargo.toml', 'inspiring/rust-toolchain.toml') }}
+          key: ${{ runner.os }}-cargo-inspiring-tests-${{ hashFiles('inspiring/Cargo.lock', 'inspiring/Cargo.toml', 'rust-toolchain.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-inspiring-tests-
 

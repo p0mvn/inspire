@@ -5,12 +5,15 @@
 //! is materialised here, in NTT form, so the online [`crate::pack::pack`]
 //! call is a pure function of `(b_0, …, b_{d-1}, &PackPreprocessed)`.
 //!
-//! Phase 8 status: offline cache construction is implemented.
+//! The collapse `a`-side gadget digits are also cached here. They are large
+//! (`(d - 1) * ℓ` ring elements per preprocessed block), but remove the online
+//! inverse NTT, gadget inversion, and digit NTT work for each logical KS step.
 
 use rayon::prelude::*;
 use spiral_rs::poly::{from_ntt_alloc, to_ntt_alloc, PolyMatrix, PolyMatrixNTT, PolyMatrixRaw};
 
 use crate::automorph::{h, tau_g_pow};
+use crate::collapse::collect_collapse_digits;
 use crate::error::InspiringError;
 use crate::key_switching::{automorphic_image, KeySwitchingMatrix};
 use crate::params::RlweParams;
@@ -44,6 +47,12 @@ pub struct PackPreprocessed<'a> {
     /// Same as `kg_images_left` but pre-composed with `τ_h` for the
     /// right-half collapse.
     pub kg_images_right: Vec<KeySwitchingMatrix<'a>>,
+
+    /// NTT-form gadget digits for each deterministic `a`-side collapse step.
+    ///
+    /// Entries are ordered exactly as the online cascade executes: left-half
+    /// switches, right-half switches, then the final `K_h` switch.
+    pub collapse_digits_ntt: Vec<PolyMatrixNTT<'a>>,
 }
 
 impl<'a> PackPreprocessed<'a> {
@@ -87,12 +96,19 @@ impl<'a> PackPreprocessed<'a> {
 
         let two_d = 2 * params.d as u64;
         let h_d = h(params.d);
-        let kg_images_left = (0..(params.d / 2 - 1))
+        let kg_images_left: Vec<_> = (0..(params.d / 2 - 1))
             .map(|i| automorphic_image(&kg, tau_g_pow(i, params.d)))
             .collect();
-        let kg_images_right = (0..(params.d / 2 - 1))
+        let kg_images_right: Vec<_> = (0..(params.d / 2 - 1))
             .map(|i| automorphic_image(&kg, (tau_g_pow(i, params.d) * h_d) % two_d))
             .collect();
+        let collapse_digits_ntt = collect_collapse_digits(
+            params,
+            a_agg.clone(),
+            &kg_images_left,
+            &kg_images_right,
+            &kh,
+        );
 
         Ok(Self {
             params,
@@ -101,6 +117,7 @@ impl<'a> PackPreprocessed<'a> {
             kh,
             kg_images_left,
             kg_images_right,
+            collapse_digits_ntt,
         })
     }
 }
@@ -231,6 +248,7 @@ mod tests {
         assert_eq!(pre.a_agg.len(), params.d);
         assert_eq!(pre.kg_images_left.len(), params.d / 2 - 1);
         assert_eq!(pre.kg_images_right.len(), params.d / 2 - 1);
+        assert_eq!(pre.collapse_digits_ntt.len(), params.d - 1);
     }
 
     #[test]

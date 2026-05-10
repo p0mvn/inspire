@@ -1,7 +1,0 @@
-# Valar's spiral-rs fork builds on stable Rust and no longer requires the old
-# `stdarch_x86_avx512` nightly feature gate. Pin a stable toolchain so local
-# and CI builds resolve the same compiler series.
-[toolchain]
-channel = "1.89.0"
-components = ["rustfmt", "clippy"]
-targets = ["x86_64-unknown-linux-gnu"]
