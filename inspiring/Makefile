@@ -10,16 +10,20 @@
 #
 # Namespaces:
 #   oracle             Python reference oracle at tools/python-oracle/
-#   crate              (added in Phase 4) Rust crate
+#   crate              Rust crate (this directory; Phase 4 skeleton +)
 
 ORACLE_DIR := tools/python-oracle
 
 FIXTURES_DIR := fixtures
 
+# Cargo lives in this directory (the Rust crate root).
+CARGO ?= cargo
+
 .DEFAULT_GOAL := help
 .PHONY: help \
         oracle-sync oracle-test oracle-test-stage oracle-test-fast oracle-clean \
         oracle-fixtures \
+        crate-fmt crate-fmt-check crate-clippy crate-check crate-test crate-bench crate-doc crate-clean \
         test sync clean
 
 help: ## Show this help
@@ -28,15 +32,16 @@ help: ## Show this help
 	@printf "\nExamples:\n"
 	@printf "  make oracle-test                          # run all oracle tests\n"
 	@printf "  make oracle-test-stage STAGE=params       # run Stage 0 only\n"
-	@printf "  make oracle-test-stage STAGE=ring         # run Stage 1 only (once added)\n\n"
+	@printf "  make crate-check                          # cargo check the Rust crate\n"
+	@printf "  make crate-test                           # cargo test the Rust crate\n\n"
 
 # ---- Aggregate targets (operate across all namespaces) ----
 
-sync: oracle-sync ## Install/update all dependencies
+sync: oracle-sync ## Install/update all dependencies (Rust toolchain auto-installed by rust-toolchain.toml)
 
-test: oracle-test ## Run all tests across all namespaces
+test: oracle-test crate-test ## Run all tests across all namespaces
 
-clean: oracle-clean ## Remove all build/test artifacts
+clean: oracle-clean crate-clean ## Remove all build/test artifacts
 
 # ---- Python oracle (tools/python-oracle/) ----
 
@@ -65,3 +70,32 @@ oracle-clean: ## Remove Python oracle build/test artifacts
 	rm -rf $(ORACLE_DIR)/.pytest_cache $(ORACLE_DIR)/.hypothesis
 	find $(ORACLE_DIR) -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	find $(ORACLE_DIR) -type d -name '*.egg-info' -exec rm -rf {} + 2>/dev/null || true
+
+# ---- Rust crate (this directory) ----
+#
+# Requires nightly Rust + AVX-512 (see README.md and docs/spiral-rs-mapping.md).
+# rustup auto-installs the right toolchain via rust-toolchain.toml.
+
+crate-fmt: ## cargo fmt the Rust crate
+	$(CARGO) fmt --all
+
+crate-fmt-check: ## cargo fmt --check the Rust crate
+	$(CARGO) fmt --all -- --check
+
+crate-clippy: ## cargo clippy on the Rust crate (warnings denied)
+	$(CARGO) clippy --all-targets --all-features -- -D warnings
+
+crate-check: ## cargo check the Rust crate
+	$(CARGO) check --all-targets --all-features
+
+crate-test: ## cargo test the Rust crate (skeleton smoke test in Phase 4)
+	$(CARGO) test --all-features
+
+crate-bench: ## cargo bench the Rust crate (Phase 10 benchmarks)
+	$(CARGO) bench
+
+crate-doc: ## cargo doc --open for the Rust crate
+	$(CARGO) doc --no-deps --open
+
+crate-clean: ## cargo clean the Rust crate
+	$(CARGO) clean

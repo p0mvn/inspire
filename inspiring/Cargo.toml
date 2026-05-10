@@ -1,0 +1,54 @@
+[package]
+name = "inspiring"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.78"
+license = "MIT OR Apache-2.0"
+description = "InspiRING.Pack: a single-primitive ring-packing crate (eprint 2025/1352, Algorithm 1) on top of spiral-rs."
+repository = "https://github.com/<TBD>/inspiring"
+documentation = "https://docs.rs/inspiring"
+readme = "README.md"
+keywords = ["fhe", "lattice", "rlwe", "lwe", "pir"]
+categories = ["cryptography"]
+
+# We commit Cargo.lock per the top-level `.gitignore` policy (reproducible
+# benches and noise tests are part of the contract).
+
+[dependencies]
+# spiral-rs is pinned to the revision matching the reference Google InspiRING
+# implementation. See ../docs/spiral-rs-mapping.md for the full audit. This
+# revision requires nightly Rust and AVX-512 (see rust-toolchain.toml and
+# README.md).
+spiral-rs = { git = "https://github.com/menonsamir/spiral-rs.git", rev = "6929441c6551769b7d099d3af3df347cde3bae7b" }
+
+# Deterministic PRNG. spiral-rs already pulls in rand_chacha 0.3 transitively,
+# but we list it explicitly to make our own use a first-class dependency.
+rand_chacha = "0.3.1"
+rand = "0.8.5"
+
+# Discrete-Gaussian sampling, NTT, polynomial arithmetic, and ChaCha20 RNG all
+# come from spiral-rs; we do not need a separate crypto stack.
+
+thiserror = "1.0"
+
+[dev-dependencies]
+# Phase 9 tests: byte-equality with the Python oracle requires a JSON parser.
+serde_json = "1.0"
+sha2 = "0.10"
+# Phase 10 benchmarks (criterion).
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "pack"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+# Mirrors spiral-rs's profile so our benches link against an equivalent
+# release build of the dependency tree.
+[profile.release-with-debug]
+inherits = "release"
+debug = true

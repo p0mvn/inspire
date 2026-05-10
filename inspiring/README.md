@@ -1,0 +1,149 @@
+# `inspiring` — InspiRING.Pack ring-packing crate
+
+A standalone Rust implementation of **Algorithm 1 (`InspiRING.Pack`)** from
+the InsPIRe paper:
+
+> R. A. Mahdavi, S. Patel, J. Y. Seo, K. Yeo. *InsPIRe:
+> Communication-Efficient PIR with Server-side Preprocessing.*
+> ePrint 2025/1352. <https://eprint.iacr.org/2025/1352>
+
+The crate exposes one primitive:
+
+```rust
+pub fn pack<'a>(b: &LweBatch, pre: &'a PackPreprocessed<'a>)
+    -> Result<RlweCiphertext<'a>, InspiringError>;
+```
+
+which compresses `d` LWE ciphertexts (each of LWE dim `d`) into a single RLWE
+ciphertext of degree `d`, using exactly **two** key-switching matrices
+`K_g` and `K_h`. Built on
+[`spiral-rs`](https://github.com/menonsamir/spiral-rs) pinned to
+`rev = 6929441` (matching the reference Google implementation).
+
+## Status
+
+This repo is **mid-build**. Phase tracking:
+
+| Phase | Concept                                              | Status |
+| ----- | ---------------------------------------------------- | ------ |
+| 1     | `SPEC.md` — paper-to-code contract                   | done   |
+| 2     | Python reference oracle (`tools/python-oracle/`)     | done   |
+| 3     | spiral-rs primitive audit (`docs/spiral-rs-mapping.md`) | done   |
+| 4     | Crate skeleton (`Cargo.toml`, `src/`, `tests/`, …)   | done   |
+| 5     | Stage 1 (`intermediate::transform`)                  | pending |
+| 6     | Stage 2 (`intermediate::aggregate`)                  | pending |
+| 7     | Stage 3 (`collapse::*`, `key_switching::*`)          | pending |
+| 8     | `pack` + offline / online split                      | pending |
+| 9     | Test suite (Lemma 1, oracle match, Theorem 2, …)     | pending |
+| 10    | Benchmarks (paper Table 5)                           | pending |
+| 11    | Production hardening (rustdoc, fuzz, CI, security)   | pending |
+
+See [`SPEC.md`](SPEC.md) for the mathematical contract and
+[`docs/spiral-rs-mapping.md`](docs/spiral-rs-mapping.md) for the
+spiral-rs primitive audit.
+
+## Locked-in scope
+
+- **Algorithm 1 only** — full `d → 1` packing of `d` LWE ciphertexts into
+  one RLWE ciphertext, using exactly two key-switching matrices.
+- No `PartialPack`, no PIR layers (`InsPIRe`, `InsPIRe^(2)`, `InsPIRe_0`),
+  no homomorphic polynomial evaluation.
+- Production posture: offline/online split, full unit and integration
+  tests, statistical noise validation against Theorem 2, benchmarks
+  reproducing paper Table 5, CI, rustdoc.
+
+## Toolchain & platform requirements
+
+`spiral-rs` at the pinned revision uses
+`#![feature(stdarch_x86_avx512)]` and AVX-512 intrinsics. Therefore
+`inspiring` inherits these constraints:
+
+- **Nightly Rust**: pinned by [`rust-toolchain.toml`](rust-toolchain.toml)
+  to `nightly-2025-03-15`. `rustup` will install the right toolchain when
+  you `cd inspiring && cargo build`.
+- **AVX-512 host**: `x86_64-unknown-linux-gnu` (CI) or any x86 host with
+  AVX-512 (Zen 4, Tiger Lake, Sapphire Rapids, etc.). The crate does
+  **not** build on `aarch64-*` because spiral-rs imports
+  `std::arch::x86_64::*` unconditionally in `ntt.rs`.
+- **`target-cpu` selection**: spiral-rs's NTT inner loops want AVX-512.
+  CI sets `RUSTFLAGS=-C target-cpu=skylake-avx512` explicitly so builds
+  are reproducible across runner generations. Local devs on AVX-512
+  hardware can do the same via `RUSTFLAGS` or a per-user
+  `~/.cargo/config.toml`. We deliberately do **not** ship a crate-level
+  `.cargo/config.toml` because it interferes with cross-compilation
+  workarounds for non-x86 dev hosts (see "Apple Silicon devs" below).
+
+See [`docs/spiral-rs-mapping.md` §1](docs/spiral-rs-mapping.md#1-toolchain-constraints-inherited-from-spiral-rs)
+for the full constraint list.
+
+## Layout
+
+```
+inspiring/
+|-- Cargo.toml
+|-- rust-toolchain.toml
+|-- .cargo/config.toml
+|-- README.md
+|-- SPEC.md                     # Phase 1 (paper-to-code contract)
+|-- docs/
+|   `-- spiral-rs-mapping.md    # Phase 3 (primitive audit)
+|-- src/
+|   |-- lib.rs                  # public API + crate docs
+|   |-- params.rs               # RlweParams, GadgetParams, validators
+|   |-- lwe.rs                  # LweCiphertext, LweBatch, embedding
+|   |-- automorph.rs            # tau_g, tau_h, tau_g^j, trace
+|   |-- intermediate.rs         # IRCtx, transform, aggregate
+|   |-- collapse.rs             # collapse_one, collapse_half, collapse
+|   |-- key_switching.rs        # KS.Setup, KS.Switch, automorphic images
+|   |-- preprocess.rs           # PackPreprocessed (CRS-side cache)
+|   |-- pack.rs                 # top-level Algorithm 1
+|   `-- error.rs                # InspiringError
+|-- tests/                      # Phase 9 lives here
+|-- benches/
+|   `-- pack.rs                 # Phase 10 lives here
+|-- examples/
+|   `-- roundtrip.rs            # Phase 9 worked example
+|-- tools/
+|   `-- python-oracle/          # Phase 2 reference oracle (sympy)
+`-- fixtures/                   # JSON fixtures generated by the oracle
+```
+
+## Build
+
+On a Linux x86_64 + AVX-512 host:
+
+```bash
+cd inspiring
+cargo build --release           # nightly is auto-selected by rust-toolchain.toml
+cargo test                       # Phase 4 smoke test only
+cargo doc --open
+```
+
+### Apple Silicon devs
+
+`spiral-rs` (rev 6929441) imports `std::arch::x86_64` unconditionally and so
+does not compile on `aarch64-apple-darwin`. To run `cargo check` locally on
+an Apple Silicon Mac, cross-compile to `x86_64-apple-darwin`:
+
+```bash
+rustup target add x86_64-apple-darwin --toolchain nightly-2025-03-15
+cd inspiring
+cargo check --target x86_64-apple-darwin
+```
+
+This validates the build but does **not** run tests (the resulting binary
+needs an x86_64 macOS host to run; on Apple Silicon you can run the binary
+under Rosetta but the AVX-512 codepaths will not actually execute). For
+running tests, use CI or a Linux x86_64 + AVX-512 host.
+
+### Python reference oracle
+
+```bash
+make oracle-test                 # see Makefile
+```
+
+## License
+
+MIT OR Apache-2.0, at your option. See `SECURITY.md` (Phase 11) for the
+parameter-set security checklist (lattice-estimator, circular-security,
+noise budget vs. Theorem 2).
