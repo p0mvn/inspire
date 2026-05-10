@@ -11,6 +11,7 @@ use inspiring::{
 };
 use spiral_rs::poly::{to_ntt_alloc, PolyMatrix, PolyMatrixNTT, PolyMatrixRaw};
 
+use crate::modulus_switch::serialize_rlwe_response;
 use crate::params::YpirSchemeParams;
 
 /// Scalar types accepted by the SimplePIR database.
@@ -176,6 +177,28 @@ where
             out[col] = acc as u64;
         }
         out
+    }
+
+    /// Perform the SimplePIR online server path and serialize the response.
+    ///
+    /// This composes the three YPIR-SP online pieces:
+    ///
+    /// 1. first-dimension query/database multiplication,
+    /// 2. InspiRING packing of the resulting `b` blocks,
+    /// 3. row-wise single-CRT response modulus switching.
+    pub fn perform_online_computation_simplepir<'a>(
+        &self,
+        rlwe: &RlweParams,
+        first_dim_query: &[u64],
+        preprocessed: &'a [PackPreprocessed<'a>],
+    ) -> Result<Vec<u8>, InspiringError> {
+        let intermediate = self.multiply_query(rlwe, first_dim_query);
+        let packed = pack_intermediate_blocks(&intermediate, preprocessed)?;
+        Ok(serialize_rlwe_response(
+            &packed,
+            self.params.q_prime_1,
+            self.params.q_prime_2,
+        ))
     }
 }
 
@@ -399,6 +422,8 @@ mod tests {
     use inspiring::{GadgetParams, RlweParams};
     use spiral_rs::poly::{from_ntt_alloc, PolyMatrix, PolyMatrixNTT};
 
+    use crate::modulus_switch::{recover_rlwe_rows, switched_rlwe_response_len};
+
     use super::*;
 
     fn tiny_rlwe() -> RlweParams {
@@ -590,5 +615,46 @@ mod tests {
         };
 
         assert!(matches!(err, InspiringError::LweShape(_)));
+    }
+
+    #[test]
+    fn perform_online_computation_simplepir_serializes_packed_response() {
+        let rlwe = tiny_rlwe();
+        let ypir = tiny_ypir(4, 8);
+        let server = YServer::new(ypir.clone(), 0u16..32, false, true);
+        let hint_0 = vec![0u64; rlwe.d * ypir.db_cols];
+        let offline = offline_precompute_from_hint(&rlwe, &ypir, hint_0);
+        let pre = build_pack_preprocessed_blocks(
+            &rlwe,
+            &offline.crs_blocks,
+            [(zero_ks(&rlwe), zero_ks(&rlwe))],
+        )
+        .expect("build");
+        let query = [1, 0, 0, 0];
+
+        let response = server
+            .perform_online_computation_simplepir(&rlwe, &query, &pre)
+            .expect("online response");
+
+        assert_eq!(
+            response.len(),
+            switched_rlwe_response_len(rlwe.d, ypir.q_prime_1, ypir.q_prime_2)
+        );
+
+        let (_row_0, row_1) =
+            recover_rlwe_rows(&response, rlwe.d, ypir.q_prime_1, ypir.q_prime_2, rlwe.q);
+        let expected_intermediate = server.multiply_query(&rlwe, &query);
+        let expected_row_1: Vec<_> = expected_intermediate
+            .iter()
+            .map(|value| {
+                crate::modulus_switch::rescale(
+                    crate::modulus_switch::rescale(*value, rlwe.q, ypir.q_prime_1),
+                    ypir.q_prime_1,
+                    rlwe.q,
+                )
+            })
+            .collect();
+
+        assert_eq!(row_1, expected_row_1);
     }
 }
