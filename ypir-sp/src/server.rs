@@ -179,6 +179,67 @@ where
         out
     }
 
+    /// Generate YPIR's `hint_0` from supplied offline query polynomials.
+    ///
+    /// This is the scalar, single-CRT analogue of YPIR's
+    /// `answer_hint_ring`: for each DB column, split the column into `d`-row
+    /// polynomial blocks, multiply by the corresponding query polynomial in
+    /// `Z_q[X]/(X^d+1)`, and output the transposed `poly_len x db_cols`
+    /// layout consumed by [`offline_precompute_from_hint`].
+    #[must_use]
+    pub fn generate_hint_from_query_polys(
+        &self,
+        rlwe: &RlweParams,
+        query_polys: &[Vec<u64>],
+    ) -> Vec<u64> {
+        assert_eq!(
+            self.db_rows() % rlwe.d,
+            0,
+            "db rows must split into d-row blocks"
+        );
+        assert_eq!(
+            query_polys.len(),
+            self.db_rows() / rlwe.d,
+            "one query polynomial is required per d-row DB block"
+        );
+        for query in query_polys {
+            assert_eq!(query.len(), rlwe.d, "query polynomial must have degree d");
+        }
+
+        let cols = self.db_cols();
+        let rows = self.db_rows_padded();
+        let mut hint_0 = vec![0u64; rlwe.d * cols];
+
+        for col in 0..cols {
+            let mut sum = vec![0u64; rlwe.d];
+            for (block_idx, query) in query_polys.iter().enumerate() {
+                let row_start = block_idx * rlwe.d;
+                let db_poly: Vec<_> = (0..rlwe.d)
+                    .map(|coeff| self.db[col * rows + row_start + coeff].to_u64() % rlwe.q)
+                    .collect();
+                let prod = negacyclic_mul_mod(query, &db_poly, rlwe.q);
+                add_assign_mod(&mut sum, &prod, rlwe.q);
+            }
+
+            for coeff in 0..rlwe.d {
+                hint_0[coeff * cols + col] = sum[coeff];
+            }
+        }
+
+        hint_0
+    }
+
+    /// Generate `hint_0` and split it into InspiRING CRS blocks.
+    #[must_use]
+    pub fn perform_offline_precomputation_simplepir(
+        &self,
+        rlwe: &RlweParams,
+        query_polys: &[Vec<u64>],
+    ) -> OfflinePrecomputedValues {
+        let hint_0 = self.generate_hint_from_query_polys(rlwe, query_polys);
+        offline_precompute_from_hint(rlwe, &self.params, hint_0)
+    }
+
     /// Perform the SimplePIR online server path and serialize the response.
     ///
     /// This composes the three YPIR-SP online pieces:
@@ -200,6 +261,35 @@ where
             self.params.q_prime_2,
         ))
     }
+}
+
+fn add_assign_mod(out: &mut [u64], rhs: &[u64], modulus: u64) {
+    assert_eq!(out.len(), rhs.len());
+    for (out_coeff, rhs_coeff) in out.iter_mut().zip(rhs) {
+        *out_coeff = ((*out_coeff as u128 + *rhs_coeff as u128) % modulus as u128) as u64;
+    }
+}
+
+fn negacyclic_mul_mod(left: &[u64], right: &[u64], modulus: u64) -> Vec<u64> {
+    assert_eq!(left.len(), right.len());
+    let degree = left.len();
+    let mut out = vec![0u64; degree];
+
+    for (i, left_coeff) in left.iter().enumerate() {
+        for (j, right_coeff) in right.iter().enumerate() {
+            let product = (*left_coeff as u128 * *right_coeff as u128) % modulus as u128;
+            let idx = i + j;
+            if idx < degree {
+                out[idx] = ((out[idx] as u128 + product) % modulus as u128) as u64;
+            } else {
+                let wrapped = idx - degree;
+                out[wrapped] =
+                    ((out[wrapped] as u128 + modulus as u128 - product) % modulus as u128) as u64;
+            }
+        }
+    }
+
+    out
 }
 
 /// Offline values that are independent of the user's online query.
@@ -492,6 +582,61 @@ mod tests {
                 2 + 3 * 4 + 5 * 7 + 7 * 10,
                 2 * 2 + 3 * 5 + 5 * 8 + 7 * 11
             ]
+        );
+    }
+
+    #[test]
+    fn generate_hint_from_query_polys_maps_single_block_to_hint_layout() {
+        let rlwe = tiny_rlwe();
+        let ypir = tiny_ypir(8, 8);
+        let server = YServer::new(ypir.clone(), 0u16..64, false, true);
+        let query = vec![vec![1, 0, 0, 0, 0, 0, 0, 0]];
+
+        let hint_0 = server.generate_hint_from_query_polys(&rlwe, &query);
+
+        assert_eq!(hint_0.len(), rlwe.d * ypir.db_cols);
+        for coeff in 0..rlwe.d {
+            for col in 0..ypir.db_cols {
+                assert_eq!(
+                    hint_0[coeff * ypir.db_cols + col],
+                    (coeff * ypir.db_cols + col) as u64
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn generate_hint_from_query_polys_sums_multiple_row_blocks() {
+        let rlwe = tiny_rlwe();
+        let ypir = tiny_ypir(16, 8);
+        let server = YServer::new(ypir.clone(), 0u16..128, false, true);
+        let query = vec![vec![1, 0, 0, 0, 0, 0, 0, 0], vec![1, 0, 0, 0, 0, 0, 0, 0]];
+
+        let hint_0 = server.generate_hint_from_query_polys(&rlwe, &query);
+
+        for coeff in 0..rlwe.d {
+            for col in 0..ypir.db_cols {
+                let first = coeff * ypir.db_cols + col;
+                let second = (rlwe.d + coeff) * ypir.db_cols + col;
+                assert_eq!(hint_0[coeff * ypir.db_cols + col], (first + second) as u64);
+            }
+        }
+    }
+
+    #[test]
+    fn perform_offline_precomputation_simplepir_generates_blocks_from_db() {
+        let rlwe = tiny_rlwe();
+        let ypir = tiny_ypir(8, 16);
+        let server = YServer::new(ypir.clone(), 0u16..128, false, true);
+        let query = vec![vec![1, 0, 0, 0, 0, 0, 0, 0]];
+
+        let offline = server.perform_offline_precomputation_simplepir(&rlwe, &query);
+
+        assert_eq!(offline.hint_0.len(), rlwe.d * ypir.db_cols);
+        assert_eq!(offline.crs_blocks.len(), 2);
+        assert_eq!(
+            offline.crs_blocks[1].rows[0],
+            vec![8, 24, 40, 56, 72, 88, 104, 120]
         );
     }
 

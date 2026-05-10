@@ -13,7 +13,7 @@ todos:
     status: completed
   - id: server-offline
     content: Phase 3 — Port `perform_offline_precomputation_simplepir` matmul layer; replace CDKS prep with one `PackPreprocessed::build` per RLWE-output block
-    status: pending
+    status: completed
   - id: server-online
     content: Phase 4 — Port `perform_online_computation_simplepir` matmul layer; replace `pack_many_lwes` with `inspiring::pack` per RLWE-output block
     status: completed
