@@ -5,7 +5,9 @@
 //! query/database multiplication, and the `hint_0` block layout consumed by
 //! InspiRING preprocessing.
 
-use inspiring::RlweParams;
+use inspiring::key_switching::KeySwitchingMatrix;
+use inspiring::{InspiringError, PackPreprocessed, RlweParams};
+use spiral_rs::poly::{to_ntt_alloc, PolyMatrix, PolyMatrixNTT, PolyMatrixRaw};
 
 use crate::params::YpirSchemeParams;
 
@@ -191,6 +193,25 @@ pub struct CrsBlock {
     pub rows: Vec<Vec<u64>>,
 }
 
+impl CrsBlock {
+    /// Convert this block into the `[d, 1]` NTT CRS shape expected by
+    /// [`PackPreprocessed::build`].
+    pub fn to_ntt<'a>(&self, params: &'a RlweParams) -> PolyMatrixNTT<'a> {
+        assert_eq!(self.rows.len(), params.d, "CRS block must have d rows");
+
+        let mut raw = PolyMatrixRaw::zero(&params.spiral, params.d, 1);
+        for (row_idx, row) in self.rows.iter().enumerate() {
+            assert_eq!(row.len(), params.d, "CRS row must have d coefficients");
+            let poly = raw.get_poly_mut(row_idx, 0);
+            for (coeff_idx, coeff) in row.iter().enumerate() {
+                poly[coeff_idx] = coeff % params.q;
+            }
+        }
+
+        to_ntt_alloc(&raw)
+    }
+}
+
 /// Produce offline values from a supplied `hint_0`.
 ///
 /// The old YPIR implementation continues from this point into CDKS
@@ -219,6 +240,60 @@ pub fn offline_precompute_from_hint(
         .collect();
 
     OfflinePrecomputedValues { hint_0, crs_blocks }
+}
+
+/// Build InspiRING preprocessing values for already extracted CRS blocks.
+///
+/// `PackPreprocessed` owns its two key-switching matrices, so the caller
+/// supplies one owned `(K_g, K_h)` pair per block. This makes the ownership
+/// boundary explicit and avoids adding clone semantics to `inspiring`'s
+/// key-switching matrices.
+pub fn build_pack_preprocessed_blocks<'a, I>(
+    params: &'a RlweParams,
+    crs_blocks: &[CrsBlock],
+    key_pairs: I,
+) -> Result<Vec<PackPreprocessed<'a>>, InspiringError>
+where
+    I: IntoIterator<Item = (KeySwitchingMatrix<'a>, KeySwitchingMatrix<'a>)>,
+{
+    let mut out = Vec::with_capacity(crs_blocks.len());
+    let mut key_pairs = key_pairs.into_iter();
+
+    for block in crs_blocks {
+        let (kg, kh) = key_pairs.next().ok_or_else(|| {
+            InspiringError::PreprocessMismatch(format!(
+                "expected {} key-switching pairs, got fewer",
+                crs_blocks.len()
+            ))
+        })?;
+        let crs = block.to_ntt(params);
+        out.push(PackPreprocessed::build(params, &crs, kg, kh)?);
+    }
+
+    if key_pairs.next().is_some() {
+        return Err(InspiringError::PreprocessMismatch(format!(
+            "expected {} key-switching pairs, got more",
+            crs_blocks.len()
+        )));
+    }
+
+    Ok(out)
+}
+
+/// Convenience wrapper that extracts CRS blocks from `hint_0` and immediately
+/// builds the corresponding InspiRING offline caches.
+pub fn build_pack_preprocessed_from_hint<'a, I>(
+    params: &'a RlweParams,
+    ypir: &YpirSchemeParams,
+    hint_0: Vec<u64>,
+    key_pairs: I,
+) -> Result<(OfflinePrecomputedValues, Vec<PackPreprocessed<'a>>), InspiringError>
+where
+    I: IntoIterator<Item = (KeySwitchingMatrix<'a>, KeySwitchingMatrix<'a>)>,
+{
+    let offline = offline_precompute_from_hint(params, ypir, hint_0);
+    let pre = build_pack_preprocessed_blocks(params, &offline.crs_blocks, key_pairs)?;
+    Ok((offline, pre))
 }
 
 /// Extract one `d x d` InspiRING CRS block from `hint_0`.
@@ -261,7 +336,9 @@ impl YpirSchemeParams {
 
 #[cfg(test)]
 mod tests {
+    use inspiring::key_switching::KeySwitchingMatrix;
     use inspiring::{GadgetParams, RlweParams};
+    use spiral_rs::poly::{from_ntt_alloc, PolyMatrix, PolyMatrixNTT};
 
     use super::*;
 
@@ -295,6 +372,13 @@ mod tests {
             q2_bits: 8,
             t_exp_left: 3,
             t_exp_right: 2,
+        }
+    }
+
+    fn zero_ks<'a>(params: &'a RlweParams) -> KeySwitchingMatrix<'a> {
+        KeySwitchingMatrix {
+            mat: PolyMatrixNTT::zero(&params.spiral, 2, params.gadget.ell),
+            params,
         }
     }
 
@@ -353,5 +437,60 @@ mod tests {
         assert_eq!(offline.crs_blocks.len(), 2);
         assert_eq!(offline.crs_blocks[0].rows.len(), rlwe.d);
         assert_eq!(offline.crs_blocks[0].rows[0].len(), rlwe.d);
+    }
+
+    #[test]
+    fn crs_block_converts_to_inspiring_ntt_shape() {
+        let rlwe = tiny_rlwe();
+        let block = CrsBlock {
+            rows: (0..rlwe.d)
+                .map(|row| {
+                    (0..rlwe.d)
+                        .map(|coeff| (row * 100 + coeff) as u64)
+                        .collect()
+                })
+                .collect(),
+        };
+
+        let crs = block.to_ntt(&rlwe);
+        let raw = from_ntt_alloc(&crs);
+
+        assert_eq!(crs.rows, rlwe.d);
+        assert_eq!(crs.cols, 1);
+        assert_eq!(
+            raw.get_poly(3, 0),
+            vec![300, 301, 302, 303, 304, 305, 306, 307]
+        );
+    }
+
+    #[test]
+    fn build_pack_preprocessed_blocks_consumes_one_key_pair_per_block() {
+        let rlwe = tiny_rlwe();
+        let ypir = tiny_ypir(4, 16);
+        let hint_0 = vec![1u64; rlwe.d * ypir.db_cols];
+        let offline = offline_precompute_from_hint(&rlwe, &ypir, hint_0);
+        let key_pairs = (0..offline.crs_blocks.len()).map(|_| (zero_ks(&rlwe), zero_ks(&rlwe)));
+
+        let pre =
+            build_pack_preprocessed_blocks(&rlwe, &offline.crs_blocks, key_pairs).expect("build");
+
+        assert_eq!(pre.len(), 2);
+        assert_eq!(pre[0].a_hat.len(), rlwe.d);
+        assert_eq!(pre[0].a_agg.len(), rlwe.d);
+    }
+
+    #[test]
+    fn build_pack_preprocessed_blocks_rejects_wrong_key_pair_count() {
+        let rlwe = tiny_rlwe();
+        let block = CrsBlock {
+            rows: vec![vec![0; rlwe.d]; rlwe.d],
+        };
+
+        let err = match build_pack_preprocessed_blocks(&rlwe, &[block], std::iter::empty()) {
+            Ok(_) => panic!("missing key pair must fail"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err, InspiringError::PreprocessMismatch(_)));
     }
 }
