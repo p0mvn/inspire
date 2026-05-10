@@ -22,7 +22,7 @@ todos:
     status: completed
   - id: stage3
     content: Implement Stage 3 (collapse::{one,half,collapse}) using K_g automorphic images and final K_h step
-    status: pending
+    status: completed
   - id: offline_online
     content: Wire up PackPreprocessed offline cache and online pack(b, pre) entry point per CRS-model split
     status: pending
